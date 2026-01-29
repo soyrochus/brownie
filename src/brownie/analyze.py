@@ -1,0 +1,112 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import shutil
+
+from .agent_runtime import ensure_docs_dir, list_existing_facts, run_agentic_analysis
+from .cache import write_open_questions
+from .config import BrownieConfig
+
+
+class RunState:
+    def __init__(self, scan_done: bool = False, facts_done: bool = False, docs_done: bool = False):
+        self.scan_done = scan_done
+        self.facts_done = facts_done
+        self.docs_done = docs_done
+
+    def to_dict(self) -> dict:
+        return {
+            "scan_done": self.scan_done,
+            "facts_done": self.facts_done,
+            "docs_done": self.docs_done,
+        }
+
+
+def analyze_repository(config: BrownieConfig, reset_cache: bool = False) -> None:
+    root = config.root
+    brownie_dir = os.path.join(root, ".brownie")
+    cache_dir = os.path.join(brownie_dir, "cache")
+    os.makedirs(cache_dir, exist_ok=True)
+
+    if reset_cache:
+        shutil.rmtree(cache_dir, ignore_errors=True)
+        os.makedirs(cache_dir, exist_ok=True)
+
+    run_state_path = os.path.join(cache_dir, "run-state.json")
+    run_state = _load_run_state(run_state_path)
+
+    ensure_docs_dir(config)
+
+    asyncio.run(run_agentic_analysis(config))
+
+    facts = list_existing_facts(config)
+    open_questions = _derive_open_questions(facts)
+    write_open_questions(os.path.join(cache_dir, "open-questions.md"), open_questions)
+    _ensure_required_docs(config)
+
+    run_state.scan_done = True
+    run_state.facts_done = True
+    run_state.docs_done = True
+    _write_run_state(run_state_path, run_state)
+
+
+def _ensure_required_docs(config: BrownieConfig) -> None:
+    required = [
+        "project-intent-business-frame.md",
+        "domain-landscape.md",
+        "canonical-data-model.md",
+        "service-capability-map.md",
+        "architectural-guardrails.md",
+        "api-integration-contracts.md",
+        "user-journey-ui-intent.md",
+    ]
+    docs_dir = config.analysis.docs_dir
+    if not os.path.isabs(docs_dir):
+        docs_dir = os.path.join(config.root, docs_dir)
+    for filename in required:
+        path = os.path.join(docs_dir, filename)
+        if os.path.exists(path):
+            continue
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(
+                f"# {filename.replace('-', ' ').replace('.md', '').title()}\n\n"
+                "Not applicable or insufficient evidence found during bounded analysis.\n"
+            )
+
+
+def _derive_open_questions(facts: list[dict]) -> list[str]:
+    tags = {tag for fact in facts for tag in fact.get("tags", [])}
+    questions = []
+    if "intent" not in tags:
+        questions.append("What is the primary business goal or user outcome for this project?")
+    if "data-model" not in tags:
+        questions.append("What are the core domain entities and their relationships?")
+    if "service" not in tags:
+        questions.append("What are the primary services or bounded contexts?")
+    if "api" not in tags:
+        questions.append("Are there API contracts or integration points not captured in included directories?")
+    if "ui" not in tags:
+        questions.append("Is there a UI or user journey that lives outside the analyzed directories?")
+    return questions
+
+
+def _load_run_state(path: str) -> RunState:
+    if not os.path.exists(path):
+        return RunState()
+    with open(path, "r", encoding="utf-8") as handle:
+        try:
+            data = json.load(handle)
+        except json.JSONDecodeError:
+            return RunState()
+    return RunState(
+        scan_done=bool(data.get("scan_done")),
+        facts_done=bool(data.get("facts_done")),
+        docs_done=bool(data.get("docs_done")),
+    )
+
+
+def _write_run_state(path: str, run_state: RunState) -> None:
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(run_state.to_dict(), handle, indent=2)

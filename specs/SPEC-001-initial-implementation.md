@@ -1,320 +1,376 @@
-# Feature Spec: Brownie Docs Generator (Staged, No-Parser; Copilot SDK only for Codegen Phase)
+# SPEC-001 — Brownie Agentic Documentation Generator (Initial Implementation)
 
-Feature ID: BROWNIE-DOCS
+Status: Draft  
+Owner: <TBD>  
+Last updated: 2026-01-29  
 
-Owner: Iwan van der Kleijn
+---
 
-Service owner(s): brownie-cli, brownie-runner
+## 1. Purpose
 
-Status: Draft
+Brownie is an **agentic CLI application** that generates a structured documentation set for a software project by running an AI agent powered by the **GitHub Copilot SDK**.
 
-Last updated: 2026-01-29
+The agent explores the project workspace using Copilot SDK tools (directory listing, file reading, search) and writes documentation files directly into a `/docs` directory.
 
-## 0. Purpose of this Feature Spec
+Brownie does **not** statically analyze, parse, or model code. It behaves as a disciplined technical writer operating over the repository through bounded observation and iterative writing.
 
-Implement Brownie as a CLI app (`init`, `analyze`) that generates a `/docs` directory containing a fixed documentation set via staged, bounded repository reading (directory-scoped), persisting intermediate facts in `.brownie/cache`, and writing each output doc as a separate file to avoid context growth.
+---
 
-Important boundary: GitHub Copilot SDK is NOT a dependency of the Brownie application runtime/architecture; it is ONLY a dependency for the *code generation phase* performed by the code-generation agent that implements this feature. :contentReference[oaicite:0]{index=0} :contentReference[oaicite:1]{index=1}
+## 2. High-Level Vision
 
-## 1. Intent and Outcome
+Brownie:
 
-Provide a deterministic(ish) workflow that generates `docs/` with:
-- Project Intent & Business Frame
-- Domain Landscape
-- Canonical Data Model
-- Service & Capability Map
-- Architectural Guardrails
-- API / Integration Contracts (if applicable)
-- User Journey & UI Intent (if applicable)
+- Runs as a CLI (`init`, `analyze`)
+- Creates a Copilot SDK session at runtime
+- Lets the model:
+  - inspect the workspace using tools
+  - form evidence-backed claims
+  - write documentation files incrementally
+- Persists minimal state on disk to avoid context growth
+- Produces a fixed, canonical set of documentation files
 
-The analysis must be staged and repeatable; cross-document consistency is achieved via a persistent “facts” artifact stored in `.brownie/cache`.
+Brownie is **not** a compiler, indexer, or semantic analyzer.
 
-## 2. Scope (In / Out)
+---
 
-In:
-- The Brownie app must be buold on the Copilot SDK. 
-- `brownie init` creates `.brownie/` structure and `.brownie/brownie.toml` with commented example parameters.
-- `brownie analyze` generates `/docs` with the required doc set.
-- Configuration-first design: all behavior configurable via `.brownie/brownie.toml`; CLI flags can override; optional write-back to config.
-- Directory-level include/exclude controls (directories only in this version).
-- `.brownie/cache` stores temporary state (facts, open questions, run-state).
+## 3. Non-Goals (Explicit)
 
-Out:
-- Mandatory parsing (Icode/tree-sitter/AST) as a required step.
-- Default scanning of all folders in the project root.
-- Glob-based include/exclude (possible v3).
+Brownie does **not**:
 
+- Build ASTs or semantic models
+- Use parsers (tree-sitter, Icode, etc.)
+- Ingest the entire repository into a single context
+- Guarantee correctness beyond observed evidence
+- Perform runtime provider switching or multi-provider fallbacks
+- Maintain long-lived conversational memory
 
-## 3. Primary Constraints and Guardrails
+If a behavior cannot be implemented via:
+- directory listing
+- bounded file reads
+- text search (grep-like)
 
-Must:
-- Keep reads bounded: file reads are chunked and capped; grep/search bounded by hits.
-- Avoid “single-context” repo ingestion.
-- Write each document as its own file, generated from cached facts.
-- Continue under partial evidence; mark gaps explicitly rather than failing.
+…it is out of scope for this version.
 
-Must not:
-- Fail because a parser fails.
-- Read excluded directories.
-- Use Copilot SDK in the Brownie application itself.
+---
 
-## 4. Functional Behaviour
+## 4. Runtime Architecture Overview
 
-### 4.1 Init
+### 4.1 Agentic Runtime Model
 
-`brownie init` creates:
-- `.brownie/`
-- `.brownie/brownie.toml` (authoritative configuration; includes commented examples)
-- `.brownie/cache/` (scratch/temp state)
+At runtime, Brownie:
 
-### 4.2 Analyze
+1. Creates a Copilot SDK session
+2. Provides the agent with:
+   - workspace access tools
+   - system instructions
+   - bounded execution rules
+3. Lets the agent:
+   - explore included directories
+   - collect evidence
+   - write documentation files
+4. Terminates the session
 
-`brownie analyze` creates or replaces `<root>/docs/` and writes (exact names):
-- `docs/project-intent-business-frame.md`
-- `docs/domain-landscape.md`
-- `docs/canonical-data-model.md`
-- `docs/service-capability-map.md`
-- `docs/architectural-guardrails.md`
-- `docs/api-integration-contracts.md` (if not applicable: write stub with evidence note)
-- `docs/user-journey-ui-intent.md` (if not applicable: write stub with evidence note)
+The Copilot SDK is a **first-class runtime dependency**.
 
-### 4.3 Include / Exclude directories (directories-only in first version)
+---
 
-- `include_dirs`: default `["src"]` (overrideable)
-- `exclude_dirs`: default excludes typical dirs: `["node_modules","dist","build",".git",".brownie","docs"]` (overrideable)
-- Only files under included dirs are considered. Excluded dirs are never read.
+## 5. Documentation Output (Fixed Set)
 
-### 4.4 Config-first with override parity
+Brownie generates a `/docs` directory containing exactly the following files:
 
-- Precedence: CLI overrides > config > defaults.
-- Optional `--write-config` updates `.brownie/brownie.toml` to match effective parameters.
+1. `project-intent-business-frame.md`
+2. `domain-landscape.md`
+3. `canonical-data-model.md`
+4. `service-capability-map.md`
+5. `architectural-guardrails.md`
+6. `api-integration-contracts.md` (if applicable; otherwise stub)
+7. `user-journey-ui-intent.md` (if applicable; otherwise stub)
 
-## 5. Local Data and Outputs
+Each document is written independently to avoid context accumulation.
 
-### 5.1 Structure
+---
 
-`.brownie/`
-- `brownie.toml`
-- `cache/`
+## 6. Commands
 
-`docs/`
-- canonical markdown files listed above
+### 6.1 `brownie init`
 
-### 5.2 Cache artifacts (minimum)
+Initializes Brownie project state.
 
-`.brownie/cache/`
-- `facts.md` (or `facts.jsonl`): atomic claims with evidence pointers (file path + line ranges)
-- `open-questions.md`: unresolved items discovered
-- `run-state.json`: progress markers to resume
+Creates:
 
-## 6. Implementation Boundary: Copilot SDK (Code Generation Agent Only)
+```
 
+.brownie/
+brownie.toml
+cache/
 
-For the code-generation phase, the agent’s primary reference is:
-- `Copilot-SDK-Tutorial.md` (primary) :contentReference[oaicite:2]{index=2}
+```
 
-Secondary reference (when needed) for API details/edge behavior:
-- `(workspace)/vendor/copilot-sdk/` source tree (secondary)
+Responsibilities:
 
-The Brownie app must not require these documents! They are exclusivey for the code generation agent. 
+- Create `.brownie/brownie.toml` with commented example configuration
+- Create `.brownie/cache/`
+- Do **not** generate `/docs`
+- Create `.brownie/prompts/` and copy default prompt templates for customization
 
-## 7. Interfaces
+### 6.2 `brownie analyze`
 
-### 7.1 CLI
+Runs the agentic documentation process.
 
-Commands:
-- `brownie init [--root <path>]`
-- `brownie analyze [--root <path>] [--include_dirs <csv>] [--exclude_dirs <csv>] [--docs_dir <path>] [--write-config] [--reset-cache]`
+Responsibilities:
 
-### 7.2 Internal tool contract (conceptual)
+- Load configuration
+- Create Copilot SDK session
+- Run staged agent workflow
+- Create or replace `/docs`
+- Write documentation files
 
-The agent may implement/assume these primitives:
-- list directories/files (bounded)
-- read file slice (start line + max lines)
-- grep/search (bounded hits)
+---
 
-No parser tool is required!
+## 7. Configuration
 
+### 7.1 Configuration File
 
-## 8. Authentication (Copilot SDK session only; BYOK supported)
+Authoritative configuration file:
 
-### X.1 Problem Statement
+```
 
-If Brownie exclusively relies on GitHub Copilot subscription authentication via the Copilot CLI, then users might hit account limits or lack a subscription, making SDK mode unavailable.
+.brownie/brownie.toml
 
-The Copilot SDK supports BYOK via `ProviderConfig` during session creation, but Brownie must expose this capability to users.
+````
 
-### 8.2 Goals
+This file contains **both**:
+- analysis configuration
+- provider / authentication configuration
 
-1. Allow users to configure BYOK authentication via a configuration file.
-2. Support OpenAI, Azure, and Anthropic as provider types.
-3. Provide sensible default `base_url` values where applicable.
-4. Maintain backward compatibility with subscription-based authentication as the default.
+CLI flags may override config values; optional write-back is supported.
 
-Non-goals:
-- Multiple provider fallback chains
-- API key validation at configuration load time
+---
 
-### 8.3 Configuration Schema
+## 8. Authentication (Copilot SDK Session)
 
-#### 8.3.1 Configuration File Location
+### 8.1 Overview
 
-BYOK configuration SHALL be stored in `.brownie/brownie.toml` at the project root.
+Brownie supports:
 
+- GitHub Copilot **subscription authentication** (default)
+- **Bring-Your-Own-Key (BYOK)** authentication
 
-#### X.3.2 Configuration Format
+Authentication applies to **runtime Copilot SDK session creation**.
+
+---
+
+### 8.2 Provider Configuration Schema
 
 ```toml
 [provider]
-# Values: "subscription" | "api-key"
-mode = "subscription"
-
-# Required when mode = "api-key": "openai" | "azure" | "anthropic"
-type = "openai"
+mode = "subscription" # or "api-key"
 
 # Required when mode = "api-key"
+type = "openai"       # openai | azure | anthropic
 api_key = "sk-..."
 
-# Optional: defaults per provider type (see X.3.3)
+# Optional
 base_url = "https://api.openai.com/v1"
-
-# Optional: overrides model from config.toml / CLI when specified
 model = "gpt-4o"
 
-# Optional (Azure only): defaults to "2024-10-21"
+# Azure only
 azure_api_version = "2024-12-01-preview"
 ````
 
-#### X.3.3 Default Base URLs
+---
 
-When `base_url` is not specified, defaults SHALL be:
+### 8.3 Defaults
 
-* `openai`: `https://api.openai.com/v1`
-* `anthropic`: `https://api.anthropic.com`
-* `azure`: no default; `base_url` is REQUIRED
+#### Base URLs
 
-#### X.3.4 Default Models
+| Provider  | Default Base URL                                       |
+| --------- | ------------------------------------------------------ |
+| openai    | [https://api.openai.com/v1](https://api.openai.com/v1) |
+| anthropic | [https://api.anthropic.com](https://api.anthropic.com) |
+| azure     | none (required)                                        |
 
-When `model` is not specified in `brownie.toml`, defaults SHALL be:
+#### Models
 
-* `openai`: `gpt-4o`
-* `anthropic`: `claude-sonnet-4-20250514`
-* `azure`: **None** — use model from `.brownie/brownie.toml` or CLI
-* `subscription`: use model from `.brownie/brownie.toml` or CLI (default: `gpt-5`)
+| Provider     | Default Model                      |
+| ------------ | ---------------------------------- |
+| openai       | gpt-4o                             |
+| anthropic    | claude-sonnet-4-20250514           |
+| azure        | none                               |
+| subscription | from config / CLI (default: gpt-5) |
 
-Precedence rule (model resolution):
-`brownie.toml [provider].model` > provider default (if defined) > config.toml/CLI
-
-### 8.4 Implementation Requirements
-
-#### 8.4.1 Configuration Loading
-
-The loader SHALL:
-
-1. Look for `.brownie/brownie.toml`.
-2. If absent, default to `mode = "subscription"`.
-3. Parse `[provider]`.
-4. Validate required fields:
-
-   * `subscription`: no extra fields
-   * `api-key`: `type` + `api_key` required
-   * `api-key` + `azure`: `base_url` required
-
-5. Apply defaults at session creation time (not at load time).
-
-#### 8.4.2 Configuration Model
-
-Add a provider config model (example shown in Python/Pydantic terms; adapt to actual stack):
-
-```python
-class ProviderMode(str, Enum):
-    SUBSCRIPTION = "subscription"
-    API_KEY = "api-key"
-
-class ProviderType(str, Enum):
-    OPENAI = "openai"
-    AZURE = "azure"
-    ANTHROPIC = "anthropic"
-
-class ProviderConfig(BaseModel):
-    mode: ProviderMode = ProviderMode.SUBSCRIPTION
-    type: ProviderType | None = None
-    api_key: str | None = None
-    base_url: str | None = None
-    model: str | None = None
-    azure_api_version: str | None = None
-```
-
-#### 8.4.3 Session Creation (Copilot SDK)
-
-Defaults:
-
-```python
-DEFAULT_BASE_URLS = {
-    "openai": "https://api.openai.com/v1",
-    "anthropic": "https://api.anthropic.com",
-}
-
-DEFAULT_MODELS = {
-    "openai": "gpt-4o",
-    "anthropic": "claude-sonnet-4-20250514",
-}
-```
-
-#### 8X.4.4 Error Handling
-
-Raise `ConfigError` (or equivalent) with messages:
-
-* `mode = "api-key"` without `type`
-* `mode = "api-key"` without `api_key`
-* `type = "azure"` without `base_url`
-* invalid `mode`
-* invalid `type`
-
-Format:
+Model precedence:
 
 ```
-Invalid provider configuration in .brownie/brownie.toml:
-  - {field}: {reason}
+brownie.toml > provider default > CLI / config
 ```
 
-### 8.5 Security Considerations
+---
 
-* `.brownie/` SHOULD be in `.gitignore` by default.
-* Warn if an API key is present and `.brownie/` is not gitignored.
-* Env var interpolation (e.g. `${OPENAI_API_KEY}`) is explicitly deferred.
+### 8.4 Validation Rules
 
-### 8.6 Acceptance Criteria
+Errors MUST be raised before session creation if:
 
-1. Default subscription mode works unchanged when `brownie.toml` absent or `mode="subscription"`.
-2. OpenAI BYOK works with defaults if `base_url` omitted.
-3. Anthropic BYOK works with defaults if `base_url` omitted.
-4. Azure BYOK requires `base_url` and supports `azure_api_version` defaulting to `2024-10-21`.
-5. Missing required fields fails fast before session creation, with clear errors.
-6. `model` in `brownie.toml` overrides config.toml/CLI; otherwise defaults apply as defined.
+* `mode = api-key` without `type`
+* `mode = api-key` without `api_key`
+* `type = azure` without `base_url`
+* Invalid `mode` or `type`
 
+---
 
-## 9. Test Expectations
+### 8.5 Security
 
-Unit tests:
-- config merge precedence
-- include/exclude directory filtering
-- docs file set creation (including “not applicable” stubs)
+* `.brownie/` SHOULD be gitignored
+* Warn if API keys are present and directory is tracked
+* Environment variable interpolation is explicitly deferred
 
-Integration tests:
-- `init` creates correct structure
-- `analyze` generates `/docs` for a fixture repo
-- resume behavior with existing run-state
+---
 
-## 10. Open Questions / Decisions
+## 9. Analysis Scope Control
 
-- Applicability detection rules (minimum heuristic):
-  - API/Integration: OpenAPI/Swagger files, router/controller conventions, API gateway configs
-  - UI Intent: presence of UI frameworks, `/ui` or `frontend` directories, route/view components
-- Replace vs update docs directory (default: replace)
+### 9.1 Include / Exclude Directories
 
-## 11. References
+Configuration keys:
 
-- Feature spec template: `feature-spec.md` :contentReference[oaicite:3]{index=3}
-- Copilot SDK reference for code-generation agent: `Copilot-SDK-Tutorial.md` :contentReference[oaicite:4]{index=4}
-- Copilot SDK source (secondary): `vendor/copilot-sdk/` (workspace)
+```toml
+include_dirs = ["src"]
+exclude_dirs = ["node_modules", "dist", "build", ".git", ".brownie", "docs"]
+```
+
+Rules:
+
+* Only included directories are explored
+* Excluded directories are never read
+* Directories only (no globs in v1)
+
+---
+
+## 9.2 Prompt Templates and Tech Stack Detection
+
+Brownie supports stack-specific prompt templates to improve depth and relevance.
+
+### Prompt Directory
+
+`.brownie/prompts/` contains editable Markdown prompts. `brownie init` must populate this directory with defaults.
+
+### Detection Phase
+
+Before analysis, Brownie performs a lightweight tech stack detection based on:
+- File extensions in included directories
+- Common build/config markers (e.g., `pyproject.toml`, `package.json`, `go.mod`, `.csproj`, `pom.xml`)
+
+The detected stack selects the prompt file:
+
+```
+.brownie/prompts/<stack>.md
+```
+
+If no match is found, `generic.md` is used.
+
+### Required Default Prompts
+
+At minimum, the following templates are shipped and copied to `.brownie/prompts/`:
+
+- `generic.md`
+- `python.md`
+- `nodejs.md`
+- `react.md`
+- `go.md`
+- `dotnet.md`
+- `java.md`
+
+### Prompt Usage
+
+The selected prompt is appended to the system instructions for the agent and can define:
+- file discovery priorities
+- evidence collection requirements
+- doc depth expectations
+- framework-specific conventions
+
+---
+
+## 10. Agent Behavior Contract
+
+The agent:
+
+* Uses Copilot SDK tools to explore the workspace
+* Reads files in bounded slices
+* Searches text where useful
+* Writes documentation files directly
+
+The agent MUST:
+
+* Base claims on observed evidence
+* Mark uncertainty explicitly
+* Avoid speculative completion
+* Write one document at a time
+
+The agent MUST NOT:
+
+* Assume completeness
+* Invent structures not observed
+* Attempt full-repo ingestion
+
+---
+
+## 11. Persistent Scratch State
+
+`.brownie/cache/` contains **temporary run state only**:
+
+* `facts.md` or `facts.jsonl`
+  Atomic, evidence-linked claims
+* `open-questions.md`
+  Explicit unknowns
+* `run-state.json`
+  Progress markers (optional resume)
+
+This state exists to replace chat memory, not to build models.
+
+---
+
+## 12. Implementation Notes (Normative)
+
+* Brownie runtime **must** use `github-copilot-sdk` as a library
+* Copilot SDK session is created inside Brownie
+* Agent uses SDK tool interface for workspace interaction
+* Agent workflow is staged:
+  1. Inspect and collect facts/open questions (no docs)
+  2. Write each required document one at a time, using exact filenames
+  3. If a required file is missing, the agent must retry writing it
+
+### Important Clarification
+
+The following are **implementation references only**:
+
+* `Copilot-SDK-Tutorial.md`
+* `vendor/copilot-sdk/` source tree
+
+They are used by:
+
+* human developers
+* code-generation agents
+
+They MUST NOT become runtime dependencies or be read by Brownie at execution time.
+
+---
+
+## 13. Acceptance Criteria
+
+1. Brownie runs without parsers
+2. Copilot SDK session is created at runtime
+3. Subscription auth works unchanged by default
+4. BYOK works for OpenAI, Anthropic, Azure
+5. Docs directory is generated deterministically
+6. Missing applicability produces explicit stubs
+7. Configuration errors fail fast
+8. No full-repo ingestion occurs
+
+---
+
+## 14. Mental Model (Authoritative)
+
+Brownie is:
+
+> a disciplined technical writer with a notebook, limited eyesight, and access to a filing cabinet — not a compiler.
+
+Any implementation violating this model is incorrect.
