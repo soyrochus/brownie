@@ -1,9 +1,8 @@
-```md
 # Feature Spec: Brownie Docs Generator (Staged, No-Parser; Copilot SDK only for Codegen Phase)
 
 Feature ID: BROWNIE-DOCS
 
-Owner: <name/role>
+Owner: Iwan van der Kleijn
 
 Service owner(s): brownie-cli, brownie-runner
 
@@ -110,7 +109,6 @@ Must not:
 
 ## 6. Implementation Boundary: Copilot SDK (Code Generation Agent Only)
 
-This feature will be implemented by a code-generation agent. That agent MUST use GitHub Copilot SDK *only during code generation*, not as a runtime dependency of the Brownie application.
 
 For the code-generation phase, the agent’s primary reference is:
 - `Copilot-SDK-Tutorial.md` (primary) :contentReference[oaicite:2]{index=2}
@@ -118,7 +116,7 @@ For the code-generation phase, the agent’s primary reference is:
 Secondary reference (when needed) for API details/edge behavior:
 - `(workspace)/vendor/copilot-sdk/` source tree (secondary)
 
-Non-goal: the Brownie app must not require Copilot SDK to run once generated; Copilot SDK is a *build-time / generation-time* dependency for the agent, not a product dependency.
+The Brownie app must not require these documents! They are exclusivey for the code generation agent. 
 
 ## 7. Interfaces
 
@@ -137,7 +135,166 @@ The agent may implement/assume these primitives:
 
 No parser tool is required!
 
-## 8. Test Expectations
+
+## 8. Authentication (Copilot SDK session only; BYOK supported)
+
+### X.1 Problem Statement
+
+If Brownie exclusively relies on GitHub Copilot subscription authentication via the Copilot CLI, then users might hit account limits or lack a subscription, making SDK mode unavailable.
+
+The Copilot SDK supports BYOK via `ProviderConfig` during session creation, but Brownie must expose this capability to users.
+
+### 8.2 Goals
+
+1. Allow users to configure BYOK authentication via a configuration file.
+2. Support OpenAI, Azure, and Anthropic as provider types.
+3. Provide sensible default `base_url` values where applicable.
+4. Maintain backward compatibility with subscription-based authentication as the default.
+
+Non-goals:
+- Multiple provider fallback chains
+- API key validation at configuration load time
+
+### 8.3 Configuration Schema
+
+#### 8.3.1 Configuration File Location
+
+BYOK configuration SHALL be stored in `.brownie/brownie.toml` at the project root.
+
+
+#### X.3.2 Configuration Format
+
+```toml
+[provider]
+# Values: "subscription" | "api-key"
+mode = "subscription"
+
+# Required when mode = "api-key": "openai" | "azure" | "anthropic"
+type = "openai"
+
+# Required when mode = "api-key"
+api_key = "sk-..."
+
+# Optional: defaults per provider type (see X.3.3)
+base_url = "https://api.openai.com/v1"
+
+# Optional: overrides model from config.toml / CLI when specified
+model = "gpt-4o"
+
+# Optional (Azure only): defaults to "2024-10-21"
+azure_api_version = "2024-12-01-preview"
+````
+
+#### X.3.3 Default Base URLs
+
+When `base_url` is not specified, defaults SHALL be:
+
+* `openai`: `https://api.openai.com/v1`
+* `anthropic`: `https://api.anthropic.com`
+* `azure`: no default; `base_url` is REQUIRED
+
+#### X.3.4 Default Models
+
+When `model` is not specified in `brownie.toml`, defaults SHALL be:
+
+* `openai`: `gpt-4o`
+* `anthropic`: `claude-sonnet-4-20250514`
+* `azure`: **None** — use model from `.brownie/brownie.toml` or CLI
+* `subscription`: use model from `.brownie/brownie.toml` or CLI (default: `gpt-5`)
+
+Precedence rule (model resolution):
+`brownie.toml [provider].model` > provider default (if defined) > config.toml/CLI
+
+### 8.4 Implementation Requirements
+
+#### 8.4.1 Configuration Loading
+
+The loader SHALL:
+
+1. Look for `.brownie/brownie.toml`.
+2. If absent, default to `mode = "subscription"`.
+3. Parse `[provider]`.
+4. Validate required fields:
+
+   * `subscription`: no extra fields
+   * `api-key`: `type` + `api_key` required
+   * `api-key` + `azure`: `base_url` required
+
+5. Apply defaults at session creation time (not at load time).
+
+#### 8.4.2 Configuration Model
+
+Add a provider config model (example shown in Python/Pydantic terms; adapt to actual stack):
+
+```python
+class ProviderMode(str, Enum):
+    SUBSCRIPTION = "subscription"
+    API_KEY = "api-key"
+
+class ProviderType(str, Enum):
+    OPENAI = "openai"
+    AZURE = "azure"
+    ANTHROPIC = "anthropic"
+
+class ProviderConfig(BaseModel):
+    mode: ProviderMode = ProviderMode.SUBSCRIPTION
+    type: ProviderType | None = None
+    api_key: str | None = None
+    base_url: str | None = None
+    model: str | None = None
+    azure_api_version: str | None = None
+```
+
+#### 8.4.3 Session Creation (Copilot SDK)
+
+Defaults:
+
+```python
+DEFAULT_BASE_URLS = {
+    "openai": "https://api.openai.com/v1",
+    "anthropic": "https://api.anthropic.com",
+}
+
+DEFAULT_MODELS = {
+    "openai": "gpt-4o",
+    "anthropic": "claude-sonnet-4-20250514",
+}
+```
+
+#### 8X.4.4 Error Handling
+
+Raise `ConfigError` (or equivalent) with messages:
+
+* `mode = "api-key"` without `type`
+* `mode = "api-key"` without `api_key`
+* `type = "azure"` without `base_url`
+* invalid `mode`
+* invalid `type`
+
+Format:
+
+```
+Invalid provider configuration in .brownie/brownie.toml:
+  - {field}: {reason}
+```
+
+### 8.5 Security Considerations
+
+* `.brownie/` SHOULD be in `.gitignore` by default.
+* Warn if an API key is present and `.brownie/` is not gitignored.
+* Env var interpolation (e.g. `${OPENAI_API_KEY}`) is explicitly deferred.
+
+### 8.6 Acceptance Criteria
+
+1. Default subscription mode works unchanged when `brownie.toml` absent or `mode="subscription"`.
+2. OpenAI BYOK works with defaults if `base_url` omitted.
+3. Anthropic BYOK works with defaults if `base_url` omitted.
+4. Azure BYOK requires `base_url` and supports `azure_api_version` defaulting to `2024-10-21`.
+5. Missing required fields fails fast before session creation, with clear errors.
+6. `model` in `brownie.toml` overrides config.toml/CLI; otherwise defaults apply as defined.
+
+
+## 9. Test Expectations
 
 Unit tests:
 - config merge precedence
@@ -149,20 +306,15 @@ Integration tests:
 - `analyze` generates `/docs` for a fixture repo
 - resume behavior with existing run-state
 
-## 9. Open Questions / Decisions
+## 10. Open Questions / Decisions
 
 - Applicability detection rules (minimum heuristic):
   - API/Integration: OpenAPI/Swagger files, router/controller conventions, API gateway configs
   - UI Intent: presence of UI frameworks, `/ui` or `frontend` directories, route/view components
 - Replace vs update docs directory (default: replace)
 
-## 10. References
+## 11. References
 
 - Feature spec template: `feature-spec.md` :contentReference[oaicite:3]{index=3}
 - Copilot SDK reference for code-generation agent: `Copilot-SDK-Tutorial.md` :contentReference[oaicite:4]{index=4}
 - Copilot SDK source (secondary): `vendor/copilot-sdk/` (workspace)
-
-## 11. Change Log
-
-- 2026-01-29: Added explicit Copilot SDK boundary (code-generation phase only).
-```
