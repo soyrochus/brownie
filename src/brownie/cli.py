@@ -14,6 +14,7 @@ from .config import (
     resolve_provider_settings,
     write_config,
 )
+from .feedback import DefaultFeedback, VerboseFeedback
 
 
 def main() -> int:
@@ -30,6 +31,7 @@ def main() -> int:
     analyze_parser.add_argument("--docs_dir", help="Docs output directory")
     analyze_parser.add_argument("--write-config", action="store_true", help="Write effective config to brownie.toml")
     analyze_parser.add_argument("--reset-cache", action="store_true", help="Reset cache before analysis")
+    analyze_parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
 
     args = parser.parse_args()
 
@@ -64,7 +66,7 @@ def _handle_analyze(args: argparse.Namespace) -> int:
     try:
         config = load_config(root)
     except ConfigError as exc:
-        print(str(exc), file=sys.stderr)
+        print(f"Error: {exc}", file=sys.stderr)
         return 2
 
     overrides: dict[str, object] = {}
@@ -86,8 +88,12 @@ def _handle_analyze(args: argparse.Namespace) -> int:
 
     _ = resolve_provider_settings(config)
 
-    analyze_repository(config, reset_cache=args.reset_cache)
-    print("Docs generated.")
+    feedback = VerboseFeedback() if args.verbose else DefaultFeedback()
+    try:
+        analyze_repository(config, feedback, reset_cache=args.reset_cache)
+    except Exception as exc:  # noqa: BLE001
+        feedback.on_error(f"Agent failed - {exc}")
+        return 1
     return 0
 
 

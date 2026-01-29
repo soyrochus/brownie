@@ -5,9 +5,17 @@ import json
 import os
 import shutil
 
-from .agent_runtime import ensure_docs_dir, list_existing_facts, run_agentic_analysis
+from .agent_runtime import (
+    create_agent_session,
+    detect_stack,
+    ensure_docs_dir,
+    list_existing_facts,
+    run_agentic_docs,
+    run_agentic_scan,
+)
 from .cache import write_open_questions
 from .config import BrownieConfig
+from .feedback import AnalysisFeedback
 
 
 class RunState:
@@ -24,7 +32,11 @@ class RunState:
         }
 
 
-def analyze_repository(config: BrownieConfig, reset_cache: bool = False) -> None:
+def analyze_repository(
+    config: BrownieConfig,
+    feedback: AnalysisFeedback,
+    reset_cache: bool = False,
+) -> None:
     root = config.root
     brownie_dir = os.path.join(root, ".brownie")
     cache_dir = os.path.join(brownie_dir, "cache")
@@ -37,14 +49,17 @@ def analyze_repository(config: BrownieConfig, reset_cache: bool = False) -> None
     run_state_path = os.path.join(cache_dir, "run-state.json")
     run_state = _load_run_state(run_state_path)
 
-    ensure_docs_dir(config)
+    stack = detect_stack(config)
+    feedback.on_start(root, stack)
 
-    asyncio.run(run_agentic_analysis(config))
-
-    facts = list_existing_facts(config)
-    open_questions = _derive_open_questions(facts)
-    write_open_questions(os.path.join(cache_dir, "open-questions.md"), open_questions)
-    _ensure_required_docs(config)
+    asyncio.run(
+        _run_analysis_phases(
+            config=config,
+            feedback=feedback,
+            stack=stack,
+            cache_dir=cache_dir,
+        )
+    )
 
     run_state.scan_done = True
     run_state.facts_done = True
@@ -52,7 +67,44 @@ def analyze_repository(config: BrownieConfig, reset_cache: bool = False) -> None
     _write_run_state(run_state_path, run_state)
 
 
-def _ensure_required_docs(config: BrownieConfig) -> None:
+async def _run_analysis_phases(
+    config: BrownieConfig,
+    feedback: AnalysisFeedback,
+    stack: str,
+    cache_dir: str,
+) -> None:
+    client, session, ctx = await create_agent_session(config, feedback, stack)
+    try:
+        feedback.on_phase_start(1, "Scanning repository...")
+        await run_agentic_scan(session, ctx)
+        facts = list_existing_facts(config)
+        feedback.on_phase_complete(1, f"Scanning complete. {len(facts)} facts collected.")
+
+        feedback.on_phase_start(2, "Processing facts...")
+        open_questions = _derive_open_questions(facts)
+        write_open_questions(os.path.join(cache_dir, "open-questions.md"), open_questions)
+        feedback.on_phase_complete(
+            2,
+            f"Processing complete. {len(open_questions)} open questions identified.",
+        )
+
+        feedback.on_phase_start(3, "Generating documentation...")
+        ensure_docs_dir(config)
+        await run_agentic_docs(session, ctx, feedback)
+        for filename in _ensure_required_docs(config):
+            feedback.on_doc_written(filename)
+        feedback.on_phase_complete(3, "Documentation complete.")
+
+        docs_dir = config.analysis.docs_dir
+        if not os.path.isabs(docs_dir):
+            feedback.on_finish(docs_dir)
+        else:
+            feedback.on_finish(docs_dir)
+    finally:
+        await client.stop()
+
+
+def _ensure_required_docs(config: BrownieConfig) -> list[str]:
     required = [
         "project-intent-business-frame.md",
         "domain-landscape.md",
@@ -65,6 +117,7 @@ def _ensure_required_docs(config: BrownieConfig) -> None:
     docs_dir = config.analysis.docs_dir
     if not os.path.isabs(docs_dir):
         docs_dir = os.path.join(config.root, docs_dir)
+    created: list[str] = []
     for filename in required:
         path = os.path.join(docs_dir, filename)
         if os.path.exists(path):
@@ -74,6 +127,8 @@ def _ensure_required_docs(config: BrownieConfig) -> None:
                 f"# {filename.replace('-', ' ').replace('.md', '').title()}\n\n"
                 "Not applicable or insufficient evidence found during bounded analysis.\n"
             )
+        created.append(filename)
+    return created
 
 
 def _derive_open_questions(facts: list[dict]) -> list[str]:

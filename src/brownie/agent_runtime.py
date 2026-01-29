@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from .cache import Fact, load_facts, write_open_questions
 from .config import BrownieConfig, resolve_provider_settings
+from .feedback import AnalysisFeedback, create_event_handler
 from .fs import read_file_chunked
 
 
@@ -266,11 +267,11 @@ def _attach_context(ctx: AgentContext) -> list[Any]:
     return tools
 
 
-def _system_prompt(config: BrownieConfig) -> str:
+def _system_prompt(config: BrownieConfig, stack: str) -> str:
     include_dirs = ", ".join(config.analysis.include_dirs)
     exclude_dirs = ", ".join(config.analysis.exclude_dirs)
     docs_dir = config.analysis.docs_dir
-    stack_prompt = _load_stack_prompt(config)
+    stack_prompt = _load_stack_prompt(config, stack)
     return (
         "You are Brownie, an agentic technical writer. "
         "Your job is to inspect the repository using tools and produce the required documentation files.\n\n"
@@ -296,9 +297,8 @@ def _system_prompt(config: BrownieConfig) -> str:
     )
 
 
-def _load_stack_prompt(config: BrownieConfig) -> str:
+def _load_stack_prompt(config: BrownieConfig, stack: str) -> str:
     prompts_dir = os.path.join(config.root, ".brownie", "prompts")
-    stack = detect_stack(config)
     candidates = [f"{stack}.md", "generic.md"]
     for name in candidates:
         path = os.path.join(prompts_dir, name)
@@ -355,7 +355,11 @@ def detect_stack(config: BrownieConfig) -> str:
     return best[0]
 
 
-async def run_agentic_analysis(config: BrownieConfig) -> None:
+async def create_agent_session(
+    config: BrownieConfig,
+    feedback: AnalysisFeedback,
+    stack: str,
+) -> tuple[CopilotClient, Any, AgentContext]:
     provider_settings = resolve_provider_settings(config)
     provider: dict[str, Any] | None = None
     if provider_settings["mode"] == "api-key":
@@ -383,62 +387,68 @@ async def run_agentic_analysis(config: BrownieConfig) -> None:
     session_config: dict[str, Any] = {
         "model": provider_settings["model"],
         "tools": tools,
-        "systemMessage": {"content": _system_prompt(config)},
+        "systemMessage": {"content": _system_prompt(config, stack)},
     }
     if provider:
         session_config["provider"] = provider
 
     client = CopilotClient()
     await client.start()
-    try:
-        session = await client.create_session(session_config)
 
+    session = await client.create_session(session_config)
+    session.on(create_event_handler(feedback))
+    return client, session, ctx
+
+
+async def run_agentic_scan(session: Any, ctx: AgentContext) -> None:
+    await session.send_and_wait(
+        {
+            "prompt": (
+                "Stage 1: Inspect the repository using list_directory, read_file_slice, and search_text. "
+                "Collect evidence-backed facts with write_fact and open questions with write_open_question. "
+                "Do NOT write any docs yet."
+            )
+        },
+        timeout=300.0,
+    )
+
+    if not _facts_exist(ctx.cache_dir):
         await session.send_and_wait(
             {
                 "prompt": (
-                    "Stage 1: Inspect the repository using list_directory, read_file_slice, and search_text. "
-                    "Collect evidence-backed facts with write_fact and open questions with write_open_question. "
-                    "Do NOT write any docs yet."
+                    "No facts were recorded. Re-scan included directories and record at least a handful "
+                    "of evidence-backed facts before proceeding. Do NOT write docs yet."
                 )
             },
             timeout=300.0,
         )
 
-        if not _facts_exist(ctx.cache_dir):
-            await session.send_and_wait(
-                {
-                    "prompt": (
-                        "No facts were recorded. Re-scan included directories and record at least a handful "
-                        "of evidence-backed facts before proceeding. Do NOT write docs yet."
-                    )
-                },
-                timeout=300.0,
-            )
 
-        for filename in REQUIRED_DOCS:
+async def run_agentic_docs(session: Any, ctx: AgentContext, feedback: AnalysisFeedback) -> None:
+    for filename in REQUIRED_DOCS:
+        await session.send_and_wait(
+            {
+                "prompt": (
+                    f"Stage 2: Write {filename} now. Use write_doc with the exact filename. "
+                    "Base claims on observed evidence and note uncertainty. "
+                    "If not applicable, write a stub with an evidence note. "
+                    "Do not write any other files."
+                )
+            },
+            timeout=300.0,
+        )
+        if not os.path.exists(_doc_path(ctx, filename)):
             await session.send_and_wait(
                 {
                     "prompt": (
-                        f"Stage 2: Write {filename} now. Use write_doc with the exact filename. "
-                        "Base claims on observed evidence and note uncertainty. "
-                        "If not applicable, write a stub with an evidence note. "
+                        f"{filename} was not written. Write it now using write_doc with the exact filename. "
                         "Do not write any other files."
                     )
                 },
                 timeout=300.0,
             )
-            if not os.path.exists(_doc_path(ctx, filename)):
-                await session.send_and_wait(
-                    {
-                        "prompt": (
-                            f"{filename} was not written. Write it now using write_doc with the exact filename. "
-                            "Do not write any other files."
-                        )
-                    },
-                    timeout=300.0,
-                )
-    finally:
-        await client.stop()
+        if os.path.exists(_doc_path(ctx, filename)):
+            feedback.on_doc_written(filename)
 
 
 def ensure_docs_dir(config: BrownieConfig) -> str:
