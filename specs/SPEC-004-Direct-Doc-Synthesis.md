@@ -1,6 +1,6 @@
 # SPEC-004 — Direct Doc Synthesis for High‑Fidelity Output
 
-Status: Draft  
+Status: Implemented  
 Owner: Iwan van der Kleijn 
 Last updated: 2026-01-30  
 

@@ -64,9 +64,9 @@ def _system_prompt(
         "- Use bounded reads; do not attempt full-repo ingestion.\n"
         "- Base claims strictly on observed evidence. Mark uncertainty explicitly.\n"
         "- Use built-in SDK tools for reading, searching, and writing files (names vary; use the available built-ins).\n"
-        "- Write one documentation file at a time using write_file.\n"
+        "- Write one documentation file at a time using the built-in file tool.\n"
         "- Do NOT output shell commands or code blocks for file writing.\n"
-        "- Do NOT describe writing; invoke write_file directly.\n\n"
+        "- Do NOT describe writing; invoke the file tool directly.\n\n"
         "Analysis strategy:\n"
         "1) Pass 1: map structure, entrypoints, and dependencies.\n"
         "2) Pass 2: deep-read core files and any files they import.\n"
@@ -240,7 +240,7 @@ async def run_agentic_docs(
     feedback: AnalysisFeedback,
 ) -> None:
     for filename in REQUIRED_DOCS:
-        target_path = f"docs/{filename}"
+        target_path = os.path.join(ctx.docs_dir, filename)
         await session.send_and_wait(
             {
                 "prompt": (
@@ -249,7 +249,7 @@ async def run_agentic_docs(
                     "Base claims on observed evidence and note uncertainty. "
                     "If not applicable, write a stub with an evidence note. "
                     "Do not write any other files. "
-                    "Do NOT output shell commands or code blocks; invoke write_file."
+                    "Do NOT output shell commands or code blocks; invoke the file tool."
                 )
             },
             timeout=300.0,
@@ -266,6 +266,27 @@ async def run_agentic_docs(
             )
         if os.path.exists(_doc_path(ctx, filename)):
             feedback.on_doc_written(filename)
+
+
+async def run_agentic_refine(
+    session: Any,
+    merged_path: str,
+    final_path: str,
+) -> None:
+    await session.send_and_wait(
+        {
+            "prompt": (
+                "Refinement pass: Read the merged documentation and produce a refined final version. "
+                "Remove duplication, homogenize terminology, simplify without losing content, and "
+                "focus on human readability.\n\n"
+                f"Input file: {merged_path}\n"
+                f"Output file: {final_path}\n\n"
+                "Use built-in tools to read and write files. "
+                "Do NOT output shell commands or code blocks; invoke the file tool directly."
+            )
+        },
+        timeout=300.0,
+    )
 
 
 def ensure_docs_dir(config: BrownieConfig) -> str:

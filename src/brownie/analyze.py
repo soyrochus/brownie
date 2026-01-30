@@ -13,6 +13,7 @@ from .agent_runtime import (
     list_existing_facts,
     load_stack_prompt,
     run_agentic_docs,
+    run_agentic_refine,
     run_agentic_scan,
 )
 from .analysis_helpers import build_probe_plan, classify_core_files
@@ -39,6 +40,7 @@ def analyze_repository(
     config: BrownieConfig,
     feedback: AnalysisFeedback,
     reset_cache: bool = False,
+    refining: bool = False,
 ) -> None:
     root = config.root
     brownie_dir = os.path.join(root, ".brownie")
@@ -60,6 +62,7 @@ def analyze_repository(
             config=config,
             feedback=feedback,
             cache_dir=cache_dir,
+            refining=refining,
         )
     )
 
@@ -73,6 +76,7 @@ async def _run_analysis_phases(
     config: BrownieConfig,
     feedback: AnalysisFeedback,
     cache_dir: str,
+    refining: bool,
 ) -> None:
     stack, stack_confidence = detect_stack_with_confidence(config)
     stack_prompt = load_stack_prompt(config, stack)
@@ -87,24 +91,40 @@ async def _run_analysis_phases(
         core_files,
     )
     try:
-        feedback.on_phase_start(1, "Scanning repository...")
+        total_phases = 4 + (1 if refining else 0)
+        phase = 1
+        feedback.on_phase_start(phase, "Scanning repository...")
         await run_agentic_scan(session, ctx, probe_plan["generic"], probe_plan["stack"])
         facts = list_existing_facts(config)
-        feedback.on_phase_complete(1, f"Scanning complete. {len(facts)} facts collected.")
+        feedback.on_phase_complete(phase, f"Scanning complete. {len(facts)} facts collected.")
 
-        feedback.on_phase_start(2, "Processing facts...")
+        phase += 1
+        feedback.on_phase_start(phase, "Processing facts...")
         open_questions = _derive_open_questions(facts) if facts else []
         feedback.on_phase_complete(
-            2,
+            phase,
             f"Processing complete. {len(open_questions)} open questions identified.",
         )
 
-        feedback.on_phase_start(3, "Generating documentation...")
+        phase += 1
+        feedback.on_phase_start(phase, "Generating documentation...")
         ensure_docs_dir(config)
         await run_agentic_docs(session, ctx, feedback)
         for filename in _ensure_required_docs(config):
             feedback.on_doc_written(filename)
-        feedback.on_phase_complete(3, "Documentation complete.")
+        feedback.on_phase_complete(phase, "Documentation complete.")
+
+        phase += 1
+        feedback.on_phase_start(phase, "Merging documentation...")
+        merged_path = _merge_docs(config)
+        feedback.on_phase_complete(phase, f"Merged documentation written to {merged_path}.")
+
+        if refining:
+            phase += 1
+            feedback.on_phase_start(phase, "Refining merged documentation...")
+            final_path = _final_doc_path(config)
+            await run_agentic_refine(session, merged_path, final_path)
+            feedback.on_phase_complete(phase, f"Refined documentation written to {final_path}.")
 
         docs_dir = config.analysis.docs_dir
         if not os.path.isabs(docs_dir):
@@ -140,6 +160,75 @@ def _ensure_required_docs(config: BrownieConfig) -> list[str]:
             )
         created.append(filename)
     return created
+
+
+def _derive_system_name(root: str) -> str:
+    name = os.path.basename(os.path.abspath(root))
+    pyproject = os.path.join(root, "pyproject.toml")
+    if os.path.exists(pyproject):
+        try:
+            import tomllib
+
+            with open(pyproject, "rb") as handle:
+                data = tomllib.load(handle)
+            project = data.get("project", {})
+            project_name = project.get("name")
+            if project_name:
+                name = str(project_name)
+        except Exception:
+            pass
+    return _sanitize_name(name)
+
+
+def _sanitize_name(value: str) -> str:
+    value = value.strip().replace(" ", "-")
+    safe = []
+    for char in value:
+        if char.isalnum() or char in {"-", "_"}:
+            safe.append(char.lower())
+    return "".join(safe) or "system"
+
+
+def _docs_dir_path(config: BrownieConfig) -> str:
+    docs_dir = config.analysis.docs_dir
+    if not os.path.isabs(docs_dir):
+        docs_dir = os.path.join(config.root, docs_dir)
+    return docs_dir
+
+
+def _merged_doc_path(config: BrownieConfig) -> str:
+    name = _derive_system_name(config.root)
+    return os.path.join(_docs_dir_path(config), f"{name}-documentation.md")
+
+
+def _final_doc_path(config: BrownieConfig) -> str:
+    name = _derive_system_name(config.root)
+    return os.path.join(_docs_dir_path(config), f"{name}-documentation-FINAL.md")
+
+
+def _merge_docs(config: BrownieConfig) -> str:
+    order = [
+        "project-intent-business-frame.md",
+        "domain-landscape.md",
+        "canonical-data-model.md",
+        "service-capability-map.md",
+        "architectural-guardrails.md",
+        "api-integration-contracts.md",
+        "user-journey-ui-intent.md",
+    ]
+    docs_dir = _docs_dir_path(config)
+    merged_path = _merged_doc_path(config)
+    parts: list[str] = []
+    for filename in order:
+        path = os.path.join(docs_dir, filename)
+        if not os.path.exists(path):
+            continue
+        with open(path, "r", encoding="utf-8") as handle:
+            parts.append(handle.read().rstrip())
+    content = "\n\n".join([part for part in parts if part])
+    with open(merged_path, "w", encoding="utf-8") as handle:
+        handle.write(content + ("\n" if content else ""))
+    return merged_path
 
 
 def _core_file_candidates(config: BrownieConfig) -> list[str]:
