@@ -138,19 +138,14 @@ def summarize_params(tool_name: str, params: Any) -> str:
     data = _as_dict(params)
     summary = ""
 
-    if tool_name == "list_directory":
+    if tool_name == "read_file":
         summary = f"path={data.get('path')}"
-    elif tool_name == "read_file_slice":
-        start = data.get("start_line", 1)
-        max_lines = data.get("max_lines")
-        end = start
-        if isinstance(max_lines, int):
-            end = start + max_lines - 1
-        summary = f"path={data.get('path')}, lines={start}-{end}"
-    elif tool_name == "search_text":
+    elif tool_name == "search_code":
         summary = f"query=\"{data.get('query')}\""
-    elif tool_name == "write_doc":
-        summary = f"filename={data.get('filename')}"
+    elif tool_name == "run_command":
+        summary = f"command={data.get('command')}"
+    elif tool_name == "write_file":
+        summary = f"path={data.get('path')}"
     elif tool_name == "write_fact":
         claim = str(data.get("claim", ""))
         claim = _truncate_with_suffix(claim, MAX_CLAIM_SUMMARY)
@@ -176,15 +171,21 @@ def summarize_result(tool_name: str, result: Any) -> str:
         return _truncate(f"ERROR - {message}", MAX_RESULT_SUMMARY)
 
     summary = "ok"
-    if tool_name == "list_directory":
-        entries = len(data.get("directories", []) or []) + len(data.get("files", []) or [])
-        summary = f"{entries} entries"
-    elif tool_name == "read_file_slice":
-        summary = f"{len(data.get('lines', []) or [])} lines read"
-    elif tool_name == "search_text":
-        summary = f"{len(data.get('hits', []) or [])} hits"
-    elif tool_name == "write_doc":
-        summary = f"{data.get('bytes', 0)} bytes written"
+    if tool_name == "read_file":
+        content = data.get("content") or data.get("text") or ""
+        summary = f"{len(str(content).splitlines())} lines read" if content else "ok"
+    elif tool_name == "search_code":
+        hits = data.get("hits") or data.get("results") or data.get("matches") or []
+        summary = f"{len(hits)} hits"
+    elif tool_name == "run_command":
+        summary = "ok"
+        if "exit_code" in data:
+            summary = f"exit {data.get('exit_code')}"
+    elif tool_name == "write_file":
+        if "bytes" in data:
+            summary = f"{data.get('bytes')} bytes written"
+        else:
+            summary = "ok"
     elif tool_name in {"write_fact", "write_open_question"}:
         summary = "ok"
 

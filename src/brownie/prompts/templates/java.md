@@ -14,3 +14,10 @@ Evidence to extract:
 Doc depth:
 - Cite concrete classes and annotations.
 - Map request handling and service layer flow.
+
+## Probe Terms
+- @RestController
+- @Service
+- @Repository
+- Spring
+- @RequestMapping

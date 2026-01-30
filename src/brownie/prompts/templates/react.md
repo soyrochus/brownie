@@ -14,3 +14,12 @@ Evidence to extract:
 Doc depth:
 - Describe at least 3 user journeys with evidence.
 - Cite components and routes that implement them.
+
+## Probe Terms
+- react
+- jsx
+- tsx
+- router
+- route
+- page
+- layout

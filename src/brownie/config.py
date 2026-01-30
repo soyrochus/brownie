@@ -26,6 +26,18 @@ class ProviderType(str, Enum):
 DEFAULT_INCLUDE_DIRS = ["src"]
 DEFAULT_EXCLUDE_DIRS = ["node_modules", "dist", "build", ".git", ".brownie", "docs"]
 DEFAULT_DOCS_DIR = "docs"
+DEFAULT_DEEP_READ_MIN_LINES = 200
+DEFAULT_DEEP_READ_MAX_LINES = 400
+DEFAULT_CORE_FILE_MIN_FACTS = 2
+DEFAULT_MIN_EVIDENCE_PER_DOC = {
+    "intent": 3,
+    "domain": 3,
+    "data-model": 4,
+    "service": 4,
+    "guardrail": 3,
+    "api": 2,
+    "ui": 2,
+}
 
 DEFAULT_BASE_URLS = {
     ProviderType.OPENAI.value: "https://api.openai.com/v1",
@@ -59,6 +71,12 @@ class AnalysisConfig:
     max_file_lines: int = 400
     chunk_lines: int = 200
     max_grep_hits: int = 200
+    deep_read_min_lines: int = DEFAULT_DEEP_READ_MIN_LINES
+    deep_read_max_lines: int = DEFAULT_DEEP_READ_MAX_LINES
+    core_file_min_facts: int = DEFAULT_CORE_FILE_MIN_FACTS
+    min_evidence_per_doc: dict[str, int] = dataclasses.field(
+        default_factory=lambda: dict(DEFAULT_MIN_EVIDENCE_PER_DOC)
+    )
 
 
 @dataclass
@@ -84,6 +102,22 @@ def _coerce_int(value: Any, field: str, default: int) -> int:
         return int(value)
     except (TypeError, ValueError) as exc:
         raise ConfigError(f"Invalid {field}: expected int") from exc
+
+
+def _coerce_int_map(value: Any, field: str, default: dict[str, int]) -> dict[str, int]:
+    if value is None:
+        return dict(default)
+    if not isinstance(value, dict):
+        raise ConfigError(f"Invalid {field}: expected dict[str,int]")
+    result = dict(default)
+    for key, raw in value.items():
+        item_key = str(key).strip().lower().replace("_", "-")
+        if item_key == "guardrails":
+            item_key = "guardrail"
+        if item_key == "data-models":
+            item_key = "data-model"
+        result[item_key] = _coerce_int(raw, f"{field}.{item_key}", result.get(item_key, 0))
+    return result
 
 
 def load_config(root: str) -> BrownieConfig:
@@ -113,6 +147,26 @@ def load_config(root: str) -> BrownieConfig:
             max_file_lines=_coerce_int(analysis_data.get("max_file_lines"), "analysis.max_file_lines", 400),
             chunk_lines=_coerce_int(analysis_data.get("chunk_lines"), "analysis.chunk_lines", 200),
             max_grep_hits=_coerce_int(analysis_data.get("max_grep_hits"), "analysis.max_grep_hits", 200),
+            deep_read_min_lines=_coerce_int(
+                analysis_data.get("deep_read_min_lines"),
+                "analysis.deep_read_min_lines",
+                DEFAULT_DEEP_READ_MIN_LINES,
+            ),
+            deep_read_max_lines=_coerce_int(
+                analysis_data.get("deep_read_max_lines"),
+                "analysis.deep_read_max_lines",
+                DEFAULT_DEEP_READ_MAX_LINES,
+            ),
+            core_file_min_facts=_coerce_int(
+                analysis_data.get("core_file_min_facts"),
+                "analysis.core_file_min_facts",
+                DEFAULT_CORE_FILE_MIN_FACTS,
+            ),
+            min_evidence_per_doc=_coerce_int_map(
+                analysis_data.get("min_evidence_per_doc"),
+                "analysis.min_evidence_per_doc",
+                DEFAULT_MIN_EVIDENCE_PER_DOC,
+            ),
         )
 
     if provider_data:
@@ -236,6 +290,10 @@ def write_config(path: str, config: BrownieConfig) -> None:
     lines.append(f"max_file_lines = {analysis.max_file_lines}\n")
     lines.append(f"chunk_lines = {analysis.chunk_lines}\n")
     lines.append(f"max_grep_hits = {analysis.max_grep_hits}\n")
+    lines.append(f"deep_read_min_lines = {analysis.deep_read_min_lines}\n")
+    lines.append(f"deep_read_max_lines = {analysis.deep_read_max_lines}\n")
+    lines.append(f"core_file_min_facts = {analysis.core_file_min_facts}\n")
+    lines.append(f"min_evidence_per_doc = {analysis.min_evidence_per_doc!r}\n")
 
     provider = config.provider
     lines.append("\n[provider]\n")
@@ -257,4 +315,4 @@ def write_config(path: str, config: BrownieConfig) -> None:
 
 
 def brownie_toml_template() -> str:
-    return """# Brownie configuration file\n#\n# Top-level model used when provider doesn't define its own\n# model = \"gpt-5\"\n\n[analysis]\n# include_dirs: list of directories relative to root\ninclude_dirs = [\"src\"]\n\n# exclude_dirs: directories ignored during analysis\nexclude_dirs = [\"node_modules\", \"dist\", \"build\", \".git\", \".brownie\", \"docs\"]\n\n# docs_dir: output folder for generated docs\ndocs_dir = \"docs\"\n\n# Bounded analysis controls\n# max_files = 200\n# max_file_lines = 400\n# chunk_lines = 200\n# max_grep_hits = 200\n\n[provider]\n# Values: \"subscription\" | \"api-key\"\nmode = \"subscription\"\n\n# Required when mode = \"api-key\": \"openai\" | \"azure\" | \"anthropic\"\n# type = \"openai\"\n\n# Required when mode = \"api-key\"\n# api_key = \"sk-...\"\n\n# Optional: defaults per provider type\n# base_url = \"https://api.openai.com/v1\"\n\n# Optional: overrides model from config / CLI when specified\n# model = \"gpt-4o\"\n\n# Optional (Azure only): defaults to \"2024-10-21\"\n# azure_api_version = \"2024-12-01-preview\"\n"""
+    return """# Brownie configuration file\n#\n# Top-level model used when provider doesn't define its own\n# model = \"gpt-5\"\n\n[analysis]\n# include_dirs: list of directories relative to root\ninclude_dirs = [\"src\"]\n\n# exclude_dirs: directories ignored during analysis\nexclude_dirs = [\"node_modules\", \"dist\", \"build\", \".git\", \".brownie\", \"docs\"]\n\n# docs_dir: output folder for generated docs\ndocs_dir = \"docs\"\n\n# Bounded analysis controls\n# max_files = 200\n# max_file_lines = 400\n# chunk_lines = 200\n# max_grep_hits = 200\n\n# Deep read policy\n# deep_read_min_lines = 200\n# deep_read_max_lines = 400\n# core_file_min_facts = 2\n# min_evidence_per_doc = { intent = 3, domain = 3, data_model = 4, service = 4, guardrails = 3, api = 2, ui = 2 }\n\n[provider]\n# Values: \"subscription\" | \"api-key\"\nmode = \"subscription\"\n\n# Required when mode = \"api-key\": \"openai\" | \"azure\" | \"anthropic\"\n# type = \"openai\"\n\n# Required when mode = \"api-key\"\n# api_key = \"sk-...\"\n\n# Optional: defaults per provider type\n# base_url = \"https://api.openai.com/v1\"\n\n# Optional: overrides model from config / CLI when specified\n# model = \"gpt-4o\"\n\n# Optional (Azure only): defaults to \"2024-10-21\"\n# azure_api_version = \"2024-12-01-preview\"\n"""

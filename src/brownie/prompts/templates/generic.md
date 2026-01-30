@@ -17,3 +17,6 @@ Focus areas:
 - Identify domain entities, persistence, and integration points.
 - Identify services/modules and their boundaries.
 - Identify architectural constraints and policies.
+
+## Probe Terms
+Use generic probes only.

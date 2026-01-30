@@ -8,14 +8,17 @@ import shutil
 from .agent_runtime import (
     create_agent_session,
     detect_stack,
+    detect_stack_with_confidence,
     ensure_docs_dir,
     list_existing_facts,
+    load_stack_prompt,
     run_agentic_docs,
     run_agentic_scan,
 )
-from .cache import write_open_questions
+from .analysis_helpers import build_probe_plan, classify_core_files
 from .config import BrownieConfig
 from .feedback import AnalysisFeedback
+from .fs import scan_files
 
 
 class RunState:
@@ -56,7 +59,6 @@ def analyze_repository(
         _run_analysis_phases(
             config=config,
             feedback=feedback,
-            stack=stack,
             cache_dir=cache_dir,
         )
     )
@@ -70,19 +72,28 @@ def analyze_repository(
 async def _run_analysis_phases(
     config: BrownieConfig,
     feedback: AnalysisFeedback,
-    stack: str,
     cache_dir: str,
 ) -> None:
-    client, session, ctx = await create_agent_session(config, feedback, stack)
+    stack, stack_confidence = detect_stack_with_confidence(config)
+    stack_prompt = load_stack_prompt(config, stack)
+    probe_plan = build_probe_plan(stack_prompt, stack_confidence, 0.6)
+    core_files = _core_file_candidates(config)
+    client, session, ctx = await create_agent_session(
+        config,
+        feedback,
+        stack,
+        stack_confidence,
+        probe_plan["stack"],
+        core_files,
+    )
     try:
         feedback.on_phase_start(1, "Scanning repository...")
-        await run_agentic_scan(session, ctx)
+        await run_agentic_scan(session, ctx, probe_plan["generic"], probe_plan["stack"])
         facts = list_existing_facts(config)
         feedback.on_phase_complete(1, f"Scanning complete. {len(facts)} facts collected.")
 
         feedback.on_phase_start(2, "Processing facts...")
-        open_questions = _derive_open_questions(facts)
-        write_open_questions(os.path.join(cache_dir, "open-questions.md"), open_questions)
+        open_questions = _derive_open_questions(facts) if facts else []
         feedback.on_phase_complete(
             2,
             f"Processing complete. {len(open_questions)} open questions identified.",
@@ -131,8 +142,14 @@ def _ensure_required_docs(config: BrownieConfig) -> list[str]:
     return created
 
 
+def _core_file_candidates(config: BrownieConfig) -> list[str]:
+    files = scan_files(config.root, config.analysis.include_dirs, config.analysis.exclude_dirs)
+    tiers = classify_core_files(files)
+    return tiers.tier1 + tiers.tier2
+
+
 def _derive_open_questions(facts: list[dict]) -> list[str]:
-    tags = {tag for fact in facts for tag in fact.get("tags", [])}
+    tags = {str(tag).lower().replace("_", "-") for fact in facts for tag in fact.get("tags", [])}
     questions = []
     if "intent" not in tags:
         questions.append("What is the primary business goal or user outcome for this project?")

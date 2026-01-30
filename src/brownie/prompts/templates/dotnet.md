@@ -14,3 +14,10 @@ Evidence to extract:
 Doc depth:
 - Cite concrete classes and endpoints.
 - Map request pipeline and service dependencies.
+
+## Probe Terms
+- Program.cs
+- Startup
+- Controller
+- minimal API
+- endpoint

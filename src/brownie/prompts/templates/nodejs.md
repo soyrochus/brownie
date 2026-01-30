@@ -15,3 +15,12 @@ Doc depth:
 - Cite concrete modules/functions/routes.
 - Map request lifecycle and key service boundaries.
 - Highlight configuration and environment usage.
+
+## Probe Terms
+- express
+- fastify
+- koa
+- nest
+- next
+- router
+- middleware

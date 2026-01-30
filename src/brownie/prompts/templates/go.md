@@ -14,3 +14,11 @@ Evidence to extract:
 Doc depth:
 - Cite concrete packages, types, and functions.
 - Map request flow and data flow.
+
+## Probe Terms
+- func main
+- http.Handle
+- gin
+- echo
+- chi
+- fiber
