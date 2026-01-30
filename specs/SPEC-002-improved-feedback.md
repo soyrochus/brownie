@@ -1,7 +1,7 @@
 # SPEC-002 — Improved Visual Feedback
 
-Status: Draft
-Owner: <TBD>
+Status: Implemented
+Owner: Iwan van der Kleijn
 Last updated: 2026-01-29
 
 ---

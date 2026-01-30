@@ -82,6 +82,7 @@ CLI overrides:
 - `--include_dirs`, `--exclude_dirs`, `--docs_dir`
 - `--write-config` to write effective config back to `.brownie/brownie.toml`
 - `--reset-cache` to clear `.brownie/cache/` before analysis
+- `-v` / `--verbose` for detailed output (see Output Modes below)
 
 ## Authentication and Provider Defaults
 
@@ -89,6 +90,16 @@ CLI overrides:
 - **API-key mode:** requires `type` and `api_key`; Azure also requires `base_url`.
 - Default base URLs: OpenAI `https://api.openai.com/v1`, Anthropic `https://api.anthropic.com`.
 - Default models: OpenAI `gpt-4o`, Anthropic `claude-sonnet-4-20250514`.
+
+## Output Modes
+
+**Default mode** displays phase progress messages showing scanning, processing, and documentation generation phases.
+
+**Verbose mode** (`-v` / `--verbose`) adds streaming agent reasoning (prefixed with `[Agent]`) and tool invocations (`→` calls, `←` results) for debugging and transparency.
+
+```bash
+brownie analyze -v
+```
 
 ## Prompt Templates and Stack Detection
 
