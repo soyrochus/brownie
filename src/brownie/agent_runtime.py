@@ -35,6 +35,87 @@ REQUIRED_DOCS = [
     "user-journey-ui-intent.md",
 ]
 
+# Document-specific prompts with reading focus, sections, and depth requirements
+# These are stack-agnostic; stack-specific file patterns come from the stack prompt templates
+DOC_PROMPTS: dict[str, dict[str, str | int]] = {
+    "project-intent-business-frame.md": {
+        "source_focus": "entry points, main modules, project manifest files (package.json, pyproject.toml, go.mod, etc.), README",
+        "sections": """REQUIRED sections with numbered headings:
+- §1.1 Purpose (with file:line evidence)
+- §1.2 Business Goals table (columns: Goal | Description | Evidence)
+- §1.3 Target Users (bullet list)
+- §1.4 Value Proposition (evidence-backed bullets)
+- §1.5 CLI/API Commands table (columns: Command | Flags | Defaults | Exit Codes | Evidence)""",
+        "min_tables": 2,
+        "min_bullets": 5,
+        "required_elements": "Goals table with Evidence column, commands table with Evidence column",
+    },
+    "domain-landscape.md": {
+        "source_focus": "data model definitions, domain entities, type definitions, enums, interfaces",
+        "sections": """REQUIRED sections with numbered headings:
+- §2.1 Core Domain Concepts table (columns: Concept | Description | Location)
+- §2.2 Domain Boundaries (ASCII diagram showing module layers)
+- §2.3 Key Types/Enums table (columns: Name | Values | Evidence)""",
+        "min_tables": 2,
+        "min_bullets": 5,
+        "required_elements": "Concepts table with Location column, ASCII boundary diagram",
+    },
+    "canonical-data-model.md": {
+        "source_focus": "data structures, configuration types, schema definitions, persistence/cache modules",
+        "sections": """REQUIRED sections with numbered headings:
+- §3.1 Configuration Models (code tree + field table with columns: Field | Type | Default | Evidence)
+- §3.2 Domain Models (code tree + field table)
+- §3.3 Runtime Models (code tree + field table)
+- Include schema examples where serialization exists""",
+        "min_tables": 3,
+        "min_bullets": 5,
+        "required_elements": "Code structure tree per major type, field tables with Evidence column",
+    },
+    "service-capability-map.md": {
+        "source_focus": "module entry points, service definitions, orchestration logic, public interfaces",
+        "sections": """REQUIRED sections with numbered headings:
+- §4.1 Module Overview table (columns: Module | Responsibility | Key Functions)
+- §4.2+ One subsection per major module with function signatures and evidence""",
+        "min_tables": 2,
+        "min_bullets": 5,
+        "required_elements": "Module table with Key Functions column, function signatures with file:line evidence",
+    },
+    "architectural-guardrails.md": {
+        "source_focus": "configuration defaults, validation logic, error handlers, limit constants, constraint definitions",
+        "sections": """REQUIRED sections with numbered headings:
+- §5.1 Limits/Constraints table (columns: Limit | Value | Evidence)
+- §5.2 Scope Isolation rules with enforcement evidence
+- §5.3 Validation Rules with file:line evidence
+- §5.4 Error Handling paths""",
+        "min_tables": 2,
+        "min_bullets": 5,
+        "required_elements": "Constraints table with Evidence column, validation rules with enforcement evidence",
+    },
+    "api-integration-contracts.md": {
+        "source_focus": "external dependencies, SDK/library usage, HTTP clients, provider interfaces",
+        "sections": """REQUIRED sections with numbered headings:
+- §6.1 External Dependencies table (columns: Package | Usage | Evidence)
+- §6.2 Provider/SDK Integration details with code examples
+- §6.3 File Format Contracts (schemas, config formats)
+- If no external APIs found, write stub stating "No external API integrations detected in bounded reads" """,
+        "min_tables": 2,
+        "min_bullets": 3,
+        "required_elements": "External deps table with Evidence column, usage examples",
+    },
+    "user-journey-ui-intent.md": {
+        "source_focus": "CLI/UI entry points, user-facing output, feedback/logging, error messages",
+        "sections": """REQUIRED sections with numbered headings:
+- §7.1 User Interface type (CLI/Web/API)
+- §7.2 User Journeys (step sequences with file:line evidence)
+- §7.3 Output Artifacts list
+- §7.4 Error Handling (user-facing error messages with evidence)
+- If no UI layer found, write stub stating "No UI layer detected in bounded reads" """,
+        "min_tables": 1,
+        "min_bullets": 5,
+        "required_elements": "User flow diagram or step sequence with evidence",
+    },
+}
+
 
 def _resolve_docs_dir(ctx: AgentContext) -> str:
     docs_dir = ctx.docs_dir
@@ -241,19 +322,9 @@ async def run_agentic_docs(
 ) -> None:
     for filename in REQUIRED_DOCS:
         target_path = os.path.join(ctx.docs_dir, filename)
-        await session.send_and_wait(
-            {
-                "prompt": (
-                    f"Stage 2: Write {filename} now. Use the built-in file tool to save it to: {target_path}. "
-                    "Read relevant source files directly (bounded reads) and synthesize the document from evidence. "
-                    "Base claims on observed evidence and note uncertainty. "
-                    "If not applicable, write a stub with an evidence note. "
-                    "Do not write any other files. "
-                    "Do NOT output shell commands or code blocks; invoke the file tool."
-                )
-            },
-            timeout=300.0,
-        )
+        doc_config = DOC_PROMPTS.get(filename, {})
+        prompt = _build_doc_prompt(filename, target_path, doc_config)
+        await session.send_and_wait({"prompt": prompt}, timeout=300.0)
         if not os.path.exists(_doc_path(ctx, filename)):
             await session.send_and_wait(
                 {
@@ -266,6 +337,41 @@ async def run_agentic_docs(
             )
         if os.path.exists(_doc_path(ctx, filename)):
             feedback.on_doc_written(filename)
+
+
+def _build_doc_prompt(filename: str, target_path: str, config: dict[str, str | int]) -> str:
+    """Build a document-specific prompt with reading focus, sections, and depth requirements."""
+    source_focus = config.get("source_focus", "relevant source files")
+    sections = config.get("sections", "Include appropriate sections based on content found.")
+    min_tables = config.get("min_tables", 1)
+    min_bullets = config.get("min_bullets", 3)
+    required_elements = config.get("required_elements", "tables with evidence")
+
+    return f"""Write {filename} now.
+
+STEP 1 - READ SOURCE FILES:
+First, read these files: {source_focus}
+Use bounded reads (200-400 lines per file). Search for additional relevant files if needed.
+
+STEP 2 - WRITE DOCUMENT:
+Save to: {target_path}
+
+{sections}
+
+DEPTH REQUIREMENTS:
+- Minimum {min_tables} tables with Evidence column
+- Minimum {min_bullets} evidence-anchored bullet points
+- Required elements: {required_elements}
+
+EVIDENCE FORMAT:
+- Every claim must cite file:line (e.g., config.py:67)
+- Tables must have an Evidence column
+- Use format: **Evidence:** `filename.py:line` - `code snippet`
+
+RULES:
+- Use the built-in file tool to write the document
+- Do NOT output shell commands or code blocks for file writing
+- Do not write any other files"""
 
 
 async def run_agentic_refine(
@@ -287,6 +393,92 @@ async def run_agentic_refine(
         },
         timeout=300.0,
     )
+
+
+async def run_unified_analysis(
+    session: Any,
+    ctx: AgentContext,
+    feedback: AnalysisFeedback,
+    source_files: list[str],
+) -> None:
+    """Run analysis and documentation generation in a single turn.
+
+    This approach maintains context throughout the entire process,
+    allowing the agent to read files incrementally and write all
+    documents with full awareness of what it has discovered.
+    """
+    docs_dir = ctx.docs_dir
+    if not os.path.isabs(docs_dir):
+        docs_dir = os.path.join(ctx.root, docs_dir)
+
+    prompt = _build_unified_prompt(docs_dir, source_files)
+    await session.send_and_wait({"prompt": prompt}, timeout=900.0)
+
+    # Report which docs were written
+    for filename in REQUIRED_DOCS:
+        if os.path.exists(_doc_path(ctx, filename)):
+            feedback.on_doc_written(filename)
+
+
+def _build_unified_prompt(docs_dir: str, source_files: list[str]) -> str:
+    """Build a single comprehensive prompt for analyzing and documenting the codebase.
+
+    Args:
+        docs_dir: Directory where documentation files should be written
+        source_files: List of all source file paths that must be read
+    """
+    # Format the source file list for the prompt
+    file_list = "\n".join([f"- {f}" for f in source_files])
+
+    doc_instructions = []
+    for i, filename in enumerate(REQUIRED_DOCS, 1):
+        config = DOC_PROMPTS.get(filename, {})
+        source_focus = config.get("source_focus", "relevant source files")
+        sections = config.get("sections", "")
+        min_tables = config.get("min_tables", 1)
+        min_bullets = config.get("min_bullets", 3)
+        target_path = os.path.join(docs_dir, filename)
+
+        doc_instructions.append(f"""
+### Document {i}: {filename}
+**Focus on**: {source_focus}
+**Write to**: {target_path}
+{sections}
+**Minimum**: {min_tables} tables with Evidence column, {min_bullets} evidence-anchored bullets
+""")
+
+    all_docs = "\n".join(doc_instructions)
+
+    return f"""Analyze this codebase and write comprehensive documentation.
+
+## SOURCE FILES TO READ
+You MUST read ALL of these source files before writing documentation:
+{file_list}
+
+For each file, use bounded reads (200-400 lines). If a file is longer, read it in chunks.
+
+## YOUR TASK
+1. READ every source file listed above
+2. For each document, EXTRACT concrete details: function names, class fields, config values, line numbers
+3. WRITE each document with file:line evidence citations
+
+## CRITICAL REQUIREMENTS
+- You MUST read EVERY source file listed above - no shortcuts
+- Every claim MUST cite file:line (e.g., `config.py:67`)
+- Every table MUST have an Evidence column
+- Use format: **Evidence:** `filename.py:line` - `code snippet`
+- If evidence is not found in a file, state "Not found in bounded reads"
+
+## DOCUMENTS TO WRITE
+{all_docs}
+
+## PROCESS
+1. First, read ALL source files listed above (this is mandatory)
+2. Then write each document in order, using the evidence you gathered
+3. Each document should cite specific files and line numbers
+
+Use the built-in file tool to write each document. Do NOT output shell commands.
+Start by reading the source files now."""
 
 
 def ensure_docs_dir(config: BrownieConfig) -> str:

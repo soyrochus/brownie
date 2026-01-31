@@ -10,13 +10,11 @@ from .agent_runtime import (
     detect_stack,
     detect_stack_with_confidence,
     ensure_docs_dir,
-    list_existing_facts,
     load_stack_prompt,
-    run_agentic_docs,
     run_agentic_refine,
-    run_agentic_scan,
+    run_unified_analysis,
 )
-from .analysis_helpers import build_probe_plan, classify_core_files
+from .analysis_helpers import build_probe_plan, classify_core_files, is_source_file
 from .config import BrownieConfig
 from .feedback import AnalysisFeedback
 from .fs import scan_files
@@ -61,7 +59,6 @@ def analyze_repository(
         _run_analysis_phases(
             config=config,
             feedback=feedback,
-            cache_dir=cache_dir,
             refining=refining,
         )
     )
@@ -75,7 +72,6 @@ def analyze_repository(
 async def _run_analysis_phases(
     config: BrownieConfig,
     feedback: AnalysisFeedback,
-    cache_dir: str,
     refining: bool,
 ) -> None:
     stack, stack_confidence = detect_stack_with_confidence(config)
@@ -91,46 +87,35 @@ async def _run_analysis_phases(
         core_files,
     )
     try:
-        total_phases = 4 + (1 if refining else 0)
-        phase = 1
-        feedback.on_phase_start(phase, "Scanning repository...")
-        await run_agentic_scan(session, ctx, probe_plan["generic"], probe_plan["stack"])
-        facts = list_existing_facts(config)
-        feedback.on_phase_complete(phase, f"Scanning complete. {len(facts)} facts collected.")
-
-        phase += 1
-        feedback.on_phase_start(phase, "Processing facts...")
-        open_questions = _derive_open_questions(facts) if facts else []
-        feedback.on_phase_complete(
-            phase,
-            f"Processing complete. {len(open_questions)} open questions identified.",
-        )
-
-        phase += 1
-        feedback.on_phase_start(phase, "Generating documentation...")
+        # Phase 1: Unified analysis and documentation (single turn)
+        feedback.on_phase_start(1, "Analyzing and generating documentation...")
         ensure_docs_dir(config)
-        await run_agentic_docs(session, ctx, feedback)
+
+        # Scan all source files to pass to the agent, filtered by detected stack
+        all_files = scan_files(
+            config.root,
+            config.analysis.include_dirs,
+            config.analysis.exclude_dirs,
+        )
+        source_files = [f for f in all_files if is_source_file(f, stack)]
+        await run_unified_analysis(session, ctx, feedback, source_files)
         for filename in _ensure_required_docs(config):
             feedback.on_doc_written(filename)
-        feedback.on_phase_complete(phase, "Documentation complete.")
+        feedback.on_phase_complete(1, "Documentation complete.")
 
-        phase += 1
-        feedback.on_phase_start(phase, "Merging documentation...")
+        # Phase 2: Merge documents
+        feedback.on_phase_start(2, "Merging documentation...")
         merged_path = _merge_docs(config)
-        feedback.on_phase_complete(phase, f"Merged documentation written to {merged_path}.")
+        feedback.on_phase_complete(2, f"Merged documentation written to {merged_path}.")
 
+        # Phase 3 (optional): Refine merged documentation
         if refining:
-            phase += 1
-            feedback.on_phase_start(phase, "Refining merged documentation...")
+            feedback.on_phase_start(3, "Refining merged documentation...")
             final_path = _final_doc_path(config)
             await run_agentic_refine(session, merged_path, final_path)
-            feedback.on_phase_complete(phase, f"Refined documentation written to {final_path}.")
+            feedback.on_phase_complete(3, f"Refined documentation written to {final_path}.")
 
-        docs_dir = config.analysis.docs_dir
-        if not os.path.isabs(docs_dir):
-            feedback.on_finish(docs_dir)
-        else:
-            feedback.on_finish(docs_dir)
+        feedback.on_finish(config.analysis.docs_dir)
     finally:
         await client.stop()
 
@@ -235,22 +220,6 @@ def _core_file_candidates(config: BrownieConfig) -> list[str]:
     files = scan_files(config.root, config.analysis.include_dirs, config.analysis.exclude_dirs)
     tiers = classify_core_files(files)
     return tiers.tier1 + tiers.tier2
-
-
-def _derive_open_questions(facts: list[dict]) -> list[str]:
-    tags = {str(tag).lower().replace("_", "-") for fact in facts for tag in fact.get("tags", [])}
-    questions = []
-    if "intent" not in tags:
-        questions.append("What is the primary business goal or user outcome for this project?")
-    if "data-model" not in tags:
-        questions.append("What are the core domain entities and their relationships?")
-    if "service" not in tags:
-        questions.append("What are the primary services or bounded contexts?")
-    if "api" not in tags:
-        questions.append("Are there API contracts or integration points not captured in included directories?")
-    if "ui" not in tags:
-        questions.append("Is there a UI or user journey that lives outside the analyzed directories?")
-    return questions
 
 
 def _load_run_state(path: str) -> RunState:

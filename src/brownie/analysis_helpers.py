@@ -6,27 +6,32 @@ from typing import Iterable
 
 
 GENERIC_PROBES = [
+    # Entry points (cross-language)
     "main",
-    "__main__",
     "cli",
     "command",
     "runner",
+    "app",
+    "index",
+    "program",
+    # API/Web patterns
     "api",
     "route",
     "endpoint",
     "handler",
     "controller",
+    "middleware",
+    # Domain patterns
     "model",
     "schema",
     "entity",
     "repository",
+    "service",
+    "domain",
+    # Infrastructure
     "migration",
     "config",
     "settings",
-    ".env",
-    "toml",
-    "yaml",
-    "json",
     "db",
     "cache",
     "queue",
@@ -35,15 +40,17 @@ GENERIC_PROBES = [
 ]
 
 TIER1_PATTERNS = [
+    # Entry point patterns (cross-language)
     "cli",
-    "__main__",
     "main",
     "app",
+    "index",
     "server",
     "runner",
     "entry",
     "bootstrap",
     "startup",
+    "program",
 ]
 
 TIER2_PATTERNS = [
@@ -57,6 +64,81 @@ TIER2_PATTERNS = [
     "controller",
     "manager",
 ]
+
+# Stack-specific source file extensions
+STACK_EXTENSIONS: dict[str, set[str]] = {
+    "python": {".py", ".pyi", ".pyx"},
+    "nodejs": {".js", ".ts", ".mjs", ".cjs", ".jsx", ".tsx"},
+    "react": {".js", ".ts", ".jsx", ".tsx", ".mjs"},
+    "go": {".go"},
+    "java": {".java", ".kt", ".kts", ".scala"},
+    "dotnet": {".cs", ".fs", ".vb", ".razor", ".cshtml"},
+    "generic": set(),  # No filtering for generic stack
+}
+
+# Common config/doc files to always include (stack-agnostic)
+CONFIG_EXTENSIONS: set[str] = {
+    ".json",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".xml",
+    ".ini",
+    ".cfg",
+    ".conf",
+    ".env",
+    ".md",
+    ".txt",
+    ".sql",
+    ".graphql",
+    ".proto",
+}
+
+# Files to always include by name (regardless of extension)
+CONFIG_FILES: set[str] = {
+    "dockerfile",
+    "makefile",
+    "rakefile",
+    "gemfile",
+    "procfile",
+    "readme",
+    "license",
+    "changelog",
+}
+
+
+def get_source_extensions(stack: str) -> set[str]:
+    """Get the set of source file extensions for a stack.
+
+    Returns both stack-specific and common config extensions.
+    For 'generic' stack, returns only config extensions (no filtering by code extension).
+    """
+    stack_exts = STACK_EXTENSIONS.get(stack, set())
+    return stack_exts | CONFIG_EXTENSIONS
+
+
+def is_source_file(path: str, stack: str) -> bool:
+    """Check if a file should be included based on stack.
+
+    For 'generic' stack, includes all files (no extension filtering).
+    For specific stacks, filters by source code and config extensions.
+    """
+    if stack == "generic":
+        return True
+
+    import os
+
+    filename = os.path.basename(path).lower()
+    _, ext = os.path.splitext(filename)
+
+    # Check if it's a known config file by name
+    name_without_ext = os.path.splitext(filename)[0]
+    if name_without_ext in CONFIG_FILES:
+        return True
+
+    # Check extension
+    allowed = get_source_extensions(stack)
+    return ext.lower() in allowed
 
 
 @dataclass

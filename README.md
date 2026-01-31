@@ -135,6 +135,15 @@ Open questions are derived when evidence tags like `intent`, `data-model`, `serv
 - Only included directories are explored; excluded directories are never read.
 - Documentation is written one file at a time, and output is regenerated each run.
 
+## Testing
+
+Run the test suite with pytest:
+
+```bash
+uv run pytest
+```
+
+Tests are located in the `tests/` directory and cover analysis helpers, feedback output, and cache operations.
 
 ## Principles of Participation
 

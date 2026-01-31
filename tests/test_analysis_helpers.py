@@ -3,6 +3,8 @@ from brownie.analysis_helpers import (
     build_probe_plan,
     classify_core_files,
     evidence_counts_by_tag,
+    get_source_extensions,
+    is_source_file,
     parse_probe_terms,
     shallow_fact_ratio,
 )
@@ -52,3 +54,39 @@ def test_evidence_counts_and_shallow_ratio() -> None:
 
 def test_generic_probes_present() -> None:
     assert "main" in GENERIC_PROBES
+
+
+def test_get_source_extensions() -> None:
+    python_exts = get_source_extensions("python")
+    assert ".py" in python_exts
+    assert ".json" in python_exts  # Config files always included
+
+    nodejs_exts = get_source_extensions("nodejs")
+    assert ".js" in nodejs_exts
+    assert ".ts" in nodejs_exts
+    assert ".py" not in nodejs_exts
+
+    generic_exts = get_source_extensions("generic")
+    assert ".json" in generic_exts
+    assert ".py" not in generic_exts  # No code extensions for generic
+
+
+def test_is_source_file() -> None:
+    # Python stack
+    assert is_source_file("/src/main.py", "python")
+    assert is_source_file("/config.json", "python")
+    assert not is_source_file("/src/main.js", "python")
+
+    # Node.js stack
+    assert is_source_file("/src/index.js", "nodejs")
+    assert is_source_file("/src/app.ts", "nodejs")
+    assert not is_source_file("/src/main.py", "nodejs")
+
+    # Generic stack includes everything
+    assert is_source_file("/src/main.py", "generic")
+    assert is_source_file("/src/index.js", "generic")
+    assert is_source_file("/random.xyz", "generic")
+
+    # Config files by name
+    assert is_source_file("/Dockerfile", "python")
+    assert is_source_file("/Makefile", "nodejs")
