@@ -15,9 +15,10 @@ Brownie is an autonomous reverse engineering agent that analyzes codebases and p
 ## What Brownie Does
 
 - Runs an agentic CLI workflow over your repo using the GitHub Copilot SDK tools.
-- Generates each document directly from bounded source reads (not from cached summaries).
-- Produces a fixed, canonical documentation set in a docs directory.
-- Writes explicit stubs for API/UI docs when those areas are not detected.
+- Builds a stack-filtered file list from include/exclude directories and requires bounded reads before writing docs.
+- Generates each document directly from source evidence (not from cached summaries).
+- Produces a fixed, canonical documentation set in a docs directory with API/UI stubs when not detected.
+- Merges the seven docs into a single `{derived-system-name}-documentation.md` file.
 
 ## Quickstart
 
@@ -25,12 +26,10 @@ Brownie is an autonomous reverse engineering agent that analyzes codebases and p
 brownie init
 # edit .brownie/brownie.toml as needed
 brownie analyze
-# optional: merge + refine into a single doc
-brownie analyze -r
 ```
 
 Notes:
-- `brownie init` creates `.brownie/`, `.brownie/cache/`, `.brownie/brownie.toml`, copies prompt templates to `.brownie/prompts/`, and adds `.brownie/` to `.gitignore`.
+- `brownie init` creates `.brownie/`, `.brownie/cache/` (run-state), `.brownie/brownie.toml`, copies prompt templates to `.brownie/prompts/`, and adds `.brownie/` to `.gitignore`.
 - `brownie analyze` replaces the docs directory (deletes and recreates it) before writing output.
 - Use `--root` to point at another project root.
 
@@ -48,9 +47,6 @@ Brownie always generates these files (stubbing when not applicable):
 
 After the seven files are written, Brownie merges them into a single file in the same docs directory:
 - `{derived-system-name}-documentation.md`
-
-When `-r` / `--refining` is used, Brownie runs a final refinement pass and writes:
-- `{derived-system-name}-documentation-FINAL.md`
 
 `derived-system-name` is taken from `pyproject.toml` (`project.name`) when available, otherwise it falls back to the repo folder name.
 
@@ -95,7 +91,6 @@ CLI overrides:
 - `--write-config` to write effective config back to `.brownie/brownie.toml`
 - `--reset-cache` to clear `.brownie/cache/` before analysis
 - `-v` / `--verbose` for detailed output (see Output Modes below)
-- `-r` / `--refining` to create a merged and refined single-document output
 
 ## Authentication and Provider Defaults
 
@@ -106,7 +101,7 @@ CLI overrides:
 
 ## Output Modes
 
-**Default mode** displays phase progress messages showing scanning, processing, and documentation generation phases.
+**Default mode** displays phase progress messages for analysis/document generation and merge phases.
 
 **Verbose mode** (`-v` / `--verbose`) adds streaming agent reasoning (prefixed with `[Agent]`) and tool invocations (`→` calls, `←` results) for debugging and transparency.
 
@@ -122,12 +117,10 @@ Templates shipped: `generic`, `python`, `nodejs`, `react`, `go`, `dotnet`, `java
 
 ## Cache and Evidence Trail
 
-During analysis, Brownie may store:
-- `.brownie/cache/facts.jsonl` for evidence pointers (path + line ranges)
-- `.brownie/cache/open-questions.md` for gaps and uncertainties
-- `.brownie/cache/run-state.json` for run progress
+During analysis, Brownie stores:
+- `.brownie/cache/run-state.json` for run progress bookkeeping
 
-Open questions are derived when evidence tags like `intent`, `data-model`, `service`, `api`, or `ui` are missing.
+Evidence is embedded directly in the generated docs; no facts or open-questions caches are produced in the current pipeline.
 
 ## Guardrails and Limitations
 
@@ -143,7 +136,7 @@ Run the test suite with pytest:
 uv run pytest
 ```
 
-Tests are located in the `tests/` directory and cover analysis helpers, feedback output, and cache operations.
+Tests are located in the `tests/` directory and cover analysis helpers and feedback output.
 
 ## Principles of Participation
 

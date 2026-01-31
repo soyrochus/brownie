@@ -32,7 +32,6 @@ def main() -> int:
     analyze_parser.add_argument("--write-config", action="store_true", help="Write effective config to brownie.toml")
     analyze_parser.add_argument("--reset-cache", action="store_true", help="Reset cache before analysis")
     analyze_parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
-    analyze_parser.add_argument("-r", "--refining", action="store_true", help="Refine merged documentation")
 
     args = parser.parse_args()
 
@@ -91,7 +90,7 @@ def _handle_analyze(args: argparse.Namespace) -> int:
 
     feedback = VerboseFeedback() if args.verbose else DefaultFeedback()
     try:
-        analyze_repository(config, feedback, reset_cache=args.reset_cache, refining=args.refining)
+        analyze_repository(config, feedback, reset_cache=args.reset_cache)
     except Exception as exc:  # noqa: BLE001
         feedback.on_error(f"Agent failed - {exc}")
         return 1

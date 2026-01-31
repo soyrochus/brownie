@@ -8,7 +8,6 @@ from typing import Any
 from copilot import CopilotClient
 
 from .analysis_helpers import GENERIC_PROBES
-from .cache import load_facts
 from .config import BrownieConfig, resolve_provider_settings
 from .feedback import AnalysisFeedback, create_event_handler
 
@@ -19,10 +18,6 @@ class AgentContext:
     include_dirs: list[str]
     exclude_dirs: list[str]
     docs_dir: str
-    cache_dir: str
-    max_file_lines: int
-    chunk_lines: int
-    max_grep_hits: int
 
 
 REQUIRED_DOCS = [
@@ -263,10 +258,6 @@ async def create_agent_session(
         include_dirs=config.analysis.include_dirs,
         exclude_dirs=config.analysis.exclude_dirs,
         docs_dir=config.analysis.docs_dir,
-        cache_dir=os.path.join(config.root, ".brownie", "cache"),
-        max_file_lines=config.analysis.max_file_lines,
-        chunk_lines=config.analysis.chunk_lines,
-        max_grep_hits=config.analysis.max_grep_hits,
     )
 
     session_config: dict[str, Any] = {
@@ -292,107 +283,6 @@ async def create_agent_session(
     session.on(create_event_handler(feedback))
     return client, session, ctx
 
-
-async def run_agentic_scan(
-    session: Any,
-    ctx: AgentContext,
-    generic_probes: list[str],
-    stack_probes: list[str],
-) -> None:
-    probe_lines = "\n".join([f"- {probe}" for probe in generic_probes + stack_probes])
-    await session.send_and_wait(
-        {
-            "prompt": (
-                "Stage 1: Inspect the repository using built-in tools (read_file, search_code, run_command). "
-                "Perform a two-pass scan: pass 1 for structure and entrypoints, pass 2 for deep reads of core files "
-                "and files they import. Use the following probes:\n"
-                f"{probe_lines}\n"
-                "Use run_command for directory listings when needed (e.g., ls, find). "
-                "Do NOT write any docs yet."
-            )
-        },
-        timeout=300.0,
-    )
-
-
-async def run_agentic_docs(
-    session: Any,
-    ctx: AgentContext,
-    feedback: AnalysisFeedback,
-) -> None:
-    for filename in REQUIRED_DOCS:
-        target_path = os.path.join(ctx.docs_dir, filename)
-        doc_config = DOC_PROMPTS.get(filename, {})
-        prompt = _build_doc_prompt(filename, target_path, doc_config)
-        await session.send_and_wait({"prompt": prompt}, timeout=300.0)
-        if not os.path.exists(_doc_path(ctx, filename)):
-            await session.send_and_wait(
-                {
-                    "prompt": (
-                        f"{filename} was not written. Invoke the built-in file tool now to write it to {target_path}. "
-                        "Do not write any other files. Do NOT output shell commands."
-                    )
-                },
-                timeout=300.0,
-            )
-        if os.path.exists(_doc_path(ctx, filename)):
-            feedback.on_doc_written(filename)
-
-
-def _build_doc_prompt(filename: str, target_path: str, config: dict[str, str | int]) -> str:
-    """Build a document-specific prompt with reading focus, sections, and depth requirements."""
-    source_focus = config.get("source_focus", "relevant source files")
-    sections = config.get("sections", "Include appropriate sections based on content found.")
-    min_tables = config.get("min_tables", 1)
-    min_bullets = config.get("min_bullets", 3)
-    required_elements = config.get("required_elements", "tables with evidence")
-
-    return f"""Write {filename} now.
-
-STEP 1 - READ SOURCE FILES:
-First, read these files: {source_focus}
-Use bounded reads (200-400 lines per file). Search for additional relevant files if needed.
-
-STEP 2 - WRITE DOCUMENT:
-Save to: {target_path}
-
-{sections}
-
-DEPTH REQUIREMENTS:
-- Minimum {min_tables} tables with Evidence column
-- Minimum {min_bullets} evidence-anchored bullet points
-- Required elements: {required_elements}
-
-EVIDENCE FORMAT:
-- Every claim must cite file:line (e.g., config.py:67)
-- Tables must have an Evidence column
-- Use format: **Evidence:** `filename.py:line` - `code snippet`
-
-RULES:
-- Use the built-in file tool to write the document
-- Do NOT output shell commands or code blocks for file writing
-- Do not write any other files"""
-
-
-async def run_agentic_refine(
-    session: Any,
-    merged_path: str,
-    final_path: str,
-) -> None:
-    await session.send_and_wait(
-        {
-            "prompt": (
-                "Refinement pass: Read the merged documentation and produce a refined final version. "
-                "Remove duplication, homogenize terminology, simplify without losing content, and "
-                "focus on human readability.\n\n"
-                f"Input file: {merged_path}\n"
-                f"Output file: {final_path}\n\n"
-                "Use built-in tools to read and write files. "
-                "Do NOT output shell commands or code blocks; invoke the file tool directly."
-            )
-        },
-        timeout=300.0,
-    )
 
 
 async def run_unified_analysis(
@@ -489,11 +379,6 @@ def ensure_docs_dir(config: BrownieConfig) -> str:
         shutil.rmtree(docs_dir)
     os.makedirs(docs_dir, exist_ok=True)
     return docs_dir
-
-
-def list_existing_facts(config: BrownieConfig) -> list[dict]:
-    facts_path = os.path.join(config.root, ".brownie", "cache", "facts.jsonl")
-    return load_facts(facts_path)
 
 
 def _doc_path(ctx: AgentContext, filename: str) -> str:

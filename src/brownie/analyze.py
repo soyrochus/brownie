@@ -11,7 +11,6 @@ from .agent_runtime import (
     detect_stack_with_confidence,
     ensure_docs_dir,
     load_stack_prompt,
-    run_agentic_refine,
     run_unified_analysis,
 )
 from .analysis_helpers import build_probe_plan, classify_core_files, is_source_file
@@ -38,7 +37,6 @@ def analyze_repository(
     config: BrownieConfig,
     feedback: AnalysisFeedback,
     reset_cache: bool = False,
-    refining: bool = False,
 ) -> None:
     root = config.root
     brownie_dir = os.path.join(root, ".brownie")
@@ -59,7 +57,6 @@ def analyze_repository(
         _run_analysis_phases(
             config=config,
             feedback=feedback,
-            refining=refining,
         )
     )
 
@@ -72,7 +69,6 @@ def analyze_repository(
 async def _run_analysis_phases(
     config: BrownieConfig,
     feedback: AnalysisFeedback,
-    refining: bool,
 ) -> None:
     stack, stack_confidence = detect_stack_with_confidence(config)
     stack_prompt = load_stack_prompt(config, stack)
@@ -107,13 +103,6 @@ async def _run_analysis_phases(
         feedback.on_phase_start(2, "Merging documentation...")
         merged_path = _merge_docs(config)
         feedback.on_phase_complete(2, f"Merged documentation written to {merged_path}.")
-
-        # Phase 3 (optional): Refine merged documentation
-        if refining:
-            feedback.on_phase_start(3, "Refining merged documentation...")
-            final_path = _final_doc_path(config)
-            await run_agentic_refine(session, merged_path, final_path)
-            feedback.on_phase_complete(3, f"Refined documentation written to {final_path}.")
 
         feedback.on_finish(config.analysis.docs_dir)
     finally:
@@ -184,11 +173,6 @@ def _docs_dir_path(config: BrownieConfig) -> str:
 def _merged_doc_path(config: BrownieConfig) -> str:
     name = _derive_system_name(config.root)
     return os.path.join(_docs_dir_path(config), f"{name}-documentation.md")
-
-
-def _final_doc_path(config: BrownieConfig) -> str:
-    name = _derive_system_name(config.root)
-    return os.path.join(_docs_dir_path(config), f"{name}-documentation-FINAL.md")
 
 
 def _merge_docs(config: BrownieConfig) -> str:
