@@ -12,6 +12,8 @@ Brownie is an autonomous reverse engineering agent that analyzes codebases and p
 ![Poch, the brownie who reads before he speaks.](/images/Poch-small.png)
 > Poch, the brownie who reads before he speaks.
 
+NOTE: Currently this application is a thin shell over the Copilot SDK and very much alpha software and the Copilot SDK itself is still in early beta. So use at your own risk!
+
 ## What Brownie Does
 
 - Runs an agentic CLI workflow over your repo using the GitHub Copilot SDK tools.
