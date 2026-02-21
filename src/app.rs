@@ -3,12 +3,22 @@ use crate::event::AppEvent;
 use crate::session::store;
 use crate::session::{Message, SessionMeta, SCHEMA_VERSION};
 use crate::theme::Theme;
+use crate::ui::catalog::{CatalogManager, UiIntent};
 use crate::ui::runtime::UiRuntime;
 use copilot_sdk::ConnectionState;
 use eframe::egui::{self, Align, Frame, RichText, ScrollArea, Stroke};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(Debug, Clone)]
+struct TemplateSelectionContext {
+    template_id: String,
+    title: String,
+    provider_id: String,
+    provider_kind: String,
+}
 
 pub struct BrownieApp {
     rx: Receiver<AppEvent>,
@@ -27,6 +37,10 @@ pub struct BrownieApp {
     session_unavailable: bool,
     theme: Theme,
     ui_runtime: UiRuntime,
+    catalog_manager: CatalogManager,
+    active_intent: UiIntent,
+    selected_template: Option<TemplateSelectionContext>,
+    no_matching_template: bool,
 }
 
 impl BrownieApp {
@@ -36,6 +50,9 @@ impl BrownieApp {
         workspace: PathBuf,
         instruction_files: Vec<String>,
     ) -> Self {
+        let user_catalog_dir = workspace.join(".brownie").join("catalog");
+        let catalog_manager = CatalogManager::with_default_providers(user_catalog_dir, false);
+        let active_intent = Self::default_intent();
         let (sessions, warnings) = store::load_all();
         let mut app = Self {
             rx,
@@ -54,12 +71,27 @@ impl BrownieApp {
             session_unavailable: false,
             theme: Theme::default(),
             ui_runtime: UiRuntime::new(),
+            catalog_manager,
+            active_intent,
+            selected_template: None,
+            no_matching_template: false,
         };
+
+        let catalog_diagnostics = app
+            .catalog_manager
+            .load_diagnostics()
+            .iter()
+            .map(|diagnostic| diagnostic.to_log_line())
+            .collect::<Vec<_>>();
+        for diagnostic in catalog_diagnostics {
+            app.log_diagnostic(diagnostic);
+        }
 
         for warning in warnings {
             app.apply_event(AppEvent::SdkError(warning), None);
         }
 
+        app.resolve_canvas_for_intent(app.active_intent.clone());
         app
     }
 
@@ -106,6 +138,8 @@ impl BrownieApp {
         if prompt.is_empty() {
             return;
         }
+        let intent = Self::intent_from_prompt(&prompt);
+        self.resolve_canvas_for_intent(intent);
 
         let message = Message {
             role: "user".to_string(),
@@ -125,6 +159,85 @@ impl BrownieApp {
         self.input_buffer.clear();
         self.scroll_to_bottom = true;
         ctx.request_repaint();
+    }
+
+    fn default_intent() -> UiIntent {
+        UiIntent::new(
+            "code_review",
+            vec![
+                "review".to_string(),
+                "approve".to_string(),
+                "reject".to_string(),
+            ],
+            vec!["spec".to_string(), "diff".to_string()],
+        )
+    }
+
+    fn intent_from_prompt(prompt: &str) -> UiIntent {
+        let lowered = prompt.to_ascii_lowercase();
+        let primary = if lowered.contains("plan") || lowered.contains("roadmap") {
+            "plan_review"
+        } else if lowered.contains("ui") && lowered.contains("design") {
+            "ui_design_review"
+        } else {
+            "code_review"
+        };
+
+        let mut operations = BTreeSet::new();
+        if lowered.contains("approve") {
+            operations.insert("approve".to_string());
+        }
+        if lowered.contains("reject") || lowered.contains("decline") {
+            operations.insert("reject".to_string());
+        }
+        if lowered.contains("revise") || lowered.contains("change") {
+            operations.insert("revise".to_string());
+        }
+        if operations.is_empty() {
+            operations.insert("review".to_string());
+        }
+
+        let mut tags = BTreeSet::new();
+        if lowered.contains("spec") {
+            tags.insert("spec".to_string());
+        }
+        if lowered.contains("diff") || lowered.contains("patch") {
+            tags.insert("diff".to_string());
+        }
+        if lowered.contains("security") {
+            tags.insert("security".to_string());
+        }
+        if lowered.contains("plan") || lowered.contains("roadmap") {
+            tags.insert("plan".to_string());
+        }
+
+        UiIntent::new(primary, operations.into_iter().collect(), tags.into_iter().collect())
+    }
+
+    fn resolve_canvas_for_intent(&mut self, intent: UiIntent) {
+        self.active_intent = intent.clone();
+        let resolution = self.catalog_manager.resolve(&intent);
+        for line in resolution.trace.diagnostic_lines() {
+            self.log_diagnostic(line);
+        }
+
+        if let Some(template) = resolution.selected {
+            self.no_matching_template = false;
+            self.selected_template = Some(TemplateSelectionContext {
+                template_id: template.document.meta.id.clone(),
+                title: template.document.meta.title.clone(),
+                provider_id: template.source.provider_id.clone(),
+                provider_kind: template.source.kind.as_str().to_string(),
+            });
+
+            if let Err(err) = self.ui_runtime.load_schema_value(template.schema_value()) {
+                self.log_diagnostic(format!("catalog runtime error: {err}"));
+            }
+        } else {
+            self.selected_template = None;
+            self.no_matching_template = true;
+            self.ui_runtime.clear_schema();
+        }
     }
 
     fn open_session(&mut self, session_id: &str) {
@@ -413,8 +526,46 @@ impl BrownieApp {
                         .size(14.0)
                         .color(self.theme.text_primary),
                 );
+                ui.add_space(self.theme.spacing_8);
+                ui.label(
+                    RichText::new(format!("Intent: {}", self.active_intent.summary()))
+                        .size(12.0)
+                        .color(self.theme.text_muted),
+                );
+                ui.add_space(self.theme.spacing_8);
+                if let Some(selection) = &self.selected_template {
+                    ui.label(
+                        RichText::new(format!(
+                            "Template: {} ({})",
+                            selection.title, selection.template_id
+                        ))
+                        .size(12.0)
+                        .color(self.theme.text_primary),
+                    );
+                    ui.label(
+                        RichText::new(format!(
+                            "Source: {} [{}]",
+                            selection.provider_id, selection.provider_kind
+                        ))
+                        .size(12.0)
+                        .color(self.theme.text_muted),
+                    );
+                }
                 ui.add_space(self.theme.spacing_12);
-                self.ui_runtime.render_canvas(ui, &self.theme);
+                if self.no_matching_template {
+                    let frame = self
+                        .theme
+                        .panel_frame(self.theme.surface_2, self.theme.spacing_12 as i8);
+                    frame.show(ui, |ui| {
+                        ui.label(
+                            RichText::new("No matching UI template found")
+                                .size(13.0)
+                                .color(self.theme.danger),
+                        );
+                    });
+                } else {
+                    self.ui_runtime.render_canvas(ui, &self.theme);
+                }
                 ui.add_space(self.theme.spacing_12);
                 ui.separator();
                 ui.add_space(self.theme.spacing_12);

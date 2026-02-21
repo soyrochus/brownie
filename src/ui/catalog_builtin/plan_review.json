@@ -1,0 +1,54 @@
+{
+  "meta": {
+    "id": "builtin.plan_review.default",
+    "title": "Plan Review Canvas",
+    "version": "1.0.0",
+    "tags": ["plan", "roadmap"]
+  },
+  "match": {
+    "primary": "plan_review",
+    "operations": ["approve", "revise"],
+    "tags": ["plan", "milestone"]
+  },
+  "schema": {
+    "schema_version": 1,
+    "outputs": [
+      {
+        "component_id": "plan_submit",
+        "event_id": "plan.submit"
+      }
+    ],
+    "components": [
+      {
+        "id": "plan_intro",
+        "kind": "markdown",
+        "text": "### Plan Review\\nConfirm milestones and owner alignment."
+      },
+      {
+        "id": "plan_form",
+        "kind": "form",
+        "title": "Plan Controls",
+        "fields": [
+          {
+            "id": "milestone",
+            "label": "Milestone",
+            "kind": "text",
+            "default": "spec-3"
+          },
+          {
+            "id": "approval_required",
+            "label": "Approval Required",
+            "kind": "checkbox",
+            "default": true
+          }
+        ]
+      },
+      {
+        "id": "plan_submit",
+        "kind": "button",
+        "label": "Submit Plan",
+        "variant": "primary"
+      }
+    ]
+  }
+}

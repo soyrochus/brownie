@@ -1,0 +1,85 @@
+{
+  "meta": {
+    "id": "builtin.code_review.default",
+    "title": "Code Review Canvas",
+    "version": "1.0.0",
+    "tags": ["review", "diff", "spec"]
+  },
+  "match": {
+    "primary": "code_review",
+    "operations": ["approve", "reject", "review"],
+    "tags": ["spec", "diff"]
+  },
+  "schema": {
+    "schema_version": 1,
+    "outputs": [
+      {
+        "component_id": "approve_btn",
+        "event_id": "action.approve"
+      },
+      {
+        "component_id": "reject_btn",
+        "event_id": "action.reject"
+      }
+    ],
+    "components": [
+      {
+        "id": "intro_md",
+        "kind": "markdown",
+        "text": "### SPEC-3 Canvas\\nCatalog-selected deterministic runtime rendering."
+      },
+      {
+        "id": "review_form",
+        "kind": "form",
+        "title": "Review Metadata",
+        "fields": [
+          {
+            "id": "summary",
+            "label": "Summary",
+            "kind": "text",
+            "default": "Catalog selection validation pass"
+          },
+          {
+            "id": "risk_score",
+            "label": "Risk Score",
+            "kind": "number",
+            "default": 2
+          },
+          {
+            "id": "decision",
+            "label": "Decision",
+            "kind": "select",
+            "options": ["approve", "needs-changes", "reject"],
+            "default": "approve"
+          }
+        ]
+      },
+      {
+        "id": "patch_diff",
+        "kind": "diff",
+        "lines": [
+          {
+            "kind": "removed",
+            "text": "- Fixture-driven schema path"
+          },
+          {
+            "kind": "added",
+            "text": "+ Catalog-driven template resolution"
+          }
+        ]
+      },
+      {
+        "id": "approve_btn",
+        "kind": "button",
+        "label": "Approve Plan",
+        "variant": "primary"
+      },
+      {
+        "id": "reject_btn",
+        "kind": "button",
+        "label": "Request Changes",
+        "variant": "secondary"
+      }
+    ]
+  }
+}

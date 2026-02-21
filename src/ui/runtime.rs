@@ -5,10 +5,9 @@ use crate::ui::schema::{
     field_key, validate_schema, UiSchema, ValidatedComponent, ValidatedSchema,
 };
 use eframe::egui::{self, RichText, ScrollArea};
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fmt;
-
-const EMBEDDED_SCHEMA: &str = include_str!("fixture.json");
 
 #[derive(Debug, Clone)]
 pub enum RuntimeError {
@@ -37,22 +36,22 @@ pub struct UiRuntime {
 
 impl UiRuntime {
     pub fn new() -> Self {
-        let mut runtime = Self {
+        Self {
             registry: ComponentRegistry::new(),
             validated_schema: None,
             runtime_error: None,
             form_state: BTreeMap::new(),
             event_log: UiEventLog::default(),
-        };
-        runtime.load_embedded_schema();
-        runtime
+        }
     }
 
-    pub fn load_embedded_schema(&mut self) {
-        self.load_schema_json(EMBEDDED_SCHEMA);
+    pub fn clear_schema(&mut self) {
+        self.validated_schema = None;
+        self.runtime_error = None;
+        self.form_state.clear();
     }
 
-    pub fn load_schema_json(&mut self, raw_schema: &str) {
+    pub fn load_schema_json(&mut self, raw_schema: &str) -> Result<(), RuntimeError> {
         self.validated_schema = None;
         self.runtime_error = None;
         self.form_state.clear();
@@ -60,21 +59,53 @@ impl UiRuntime {
         let parsed: UiSchema = match serde_json::from_str(raw_schema) {
             Ok(schema) => schema,
             Err(err) => {
-                self.runtime_error = Some(RuntimeError::Deserialize(err.to_string()));
-                return;
+                let error = RuntimeError::Deserialize(err.to_string());
+                self.runtime_error = Some(error.clone());
+                return Err(error);
             }
         };
 
-        let validated = match validate_schema(&parsed, &self.registry) {
+        self.load_schema(parsed)
+    }
+
+    pub fn load_schema_value(&mut self, raw_schema: &Value) -> Result<(), RuntimeError> {
+        self.validated_schema = None;
+        self.runtime_error = None;
+        self.form_state.clear();
+
+        let parsed: UiSchema = match serde_json::from_value(raw_schema.clone()) {
+            Ok(schema) => schema,
+            Err(err) => {
+                let error = RuntimeError::Deserialize(err.to_string());
+                self.runtime_error = Some(error.clone());
+                return Err(error);
+            }
+        };
+
+        self.load_schema(parsed)
+    }
+
+    pub fn has_schema(&self) -> bool {
+        self.validated_schema.is_some()
+    }
+
+    pub fn runtime_error(&self) -> Option<&RuntimeError> {
+        self.runtime_error.as_ref()
+    }
+
+    fn load_schema(&mut self, schema: UiSchema) -> Result<(), RuntimeError> {
+        let validated = match validate_schema(&schema, &self.registry) {
             Ok(validated) => validated,
             Err(err) => {
-                self.runtime_error = Some(RuntimeError::Validation(err.to_string()));
-                return;
+                let error = RuntimeError::Validation(err.to_string());
+                self.runtime_error = Some(error.clone());
+                return Err(error);
             }
         };
 
         self.seed_form_state(&validated.components);
         self.validated_schema = Some(validated);
+        Ok(())
     }
 
     pub fn event_log(&self) -> &[UiEvent] {
@@ -196,10 +227,14 @@ impl UiRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn deterministic_event_sequence_for_replayed_interactions() {
         let mut first = UiRuntime::new();
+        first
+            .load_schema_json(include_str!("fixture.json"))
+            .expect("fixture should load");
         first.simulate_button_click("approve_btn");
         first.simulate_form_commit(
             "review_form",
@@ -211,6 +246,9 @@ mod tests {
         first.simulate_button_click("reject_btn");
 
         let mut second = UiRuntime::new();
+        second
+            .load_schema_json(include_str!("fixture.json"))
+            .expect("fixture should load");
         second.simulate_button_click("approve_btn");
         second.simulate_form_commit(
             "review_form",
@@ -222,5 +260,20 @@ mod tests {
         second.simulate_button_click("reject_btn");
 
         assert_eq!(first.event_log(), second.event_log());
+    }
+
+    #[test]
+    fn malformed_schema_value_sets_runtime_error() {
+        let mut runtime = UiRuntime::new();
+        let malformed = json!({
+            "schema_version": "not-a-number",
+            "outputs": [],
+            "components": []
+        });
+
+        let result = runtime.load_schema_value(&malformed);
+        assert!(matches!(result, Err(RuntimeError::Deserialize(_))));
+        assert!(runtime.runtime_error().is_some());
+        assert!(!runtime.has_schema());
     }
 }
