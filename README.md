@@ -10,7 +10,7 @@
 
 Brownie is a native desktop application that embeds GitHub Copilot agentic workflows in a structured execution shell. It is not a sidebar. It is a surface where your AI assistant works alongside you — sends and receives messages in real time, runs in passive mode by default, and persists your sessions locally.
 
-This release (SPEC-2) builds on that execution backbone and adds a validated runtime-driven Canvas: typed `UiSchema` deserialization, strict validation before render, enum-based component rendering, and deterministic typed UI event logging.
+The latest release adds a tool-driven catalog Canvas flow: a single `query_ui_catalog` interface for UI discovery/render decisions, deterministic `UiIntent`-to-template resolution, embedded builtin templates, writable user templates, strict schema validation before rendering, and typed UI event logging.
 
 ## Prerequisites
 
@@ -49,28 +49,34 @@ The window is a three-column layout with a dark theme:
 | --- | --- | --- |
 | Left | **Workspace** | Active workspace path · detected instruction files (`.github/copilot-instructions.md`, `AGENTS.md`, `*.instructions.md`) · recent session list |
 | Center | **Chat** | Streaming conversation transcript · collapsible diagnostics log · input bar |
-| Right | **Canvas** | Runtime-rendered validated UI schema · append-only typed UI event log |
+| Right | **Canvas** | Intent-gated validated template rendering · selection context · provisional template save prompt · append-only typed UI event log |
 
 **Top bar:** centered connection status with semantic marker · Passive Mode indicator · disabled Active Mode toggle.
 
 ### Passive Mode
 
-All tool calls are blocked at three independent layers: the CLI is started with `--deny-tool *`, the SDK permission handler returns `denied` by default, and the application has no code path to approve tool calls. Any tool-call events that arrive are logged to the diagnostics panel.
+Execution tools (shell/write/powershell) are blocked for the model. The session exposes one host-controlled tool, `query_ui_catalog`, for Canvas decisions only. Permission prompts are disabled (`request_permission=false`), and non-allowed tool requests are logged to diagnostics.
 
 ### Session Persistence
 
 Sessions are stored as JSON files at `~/.brownie/sessions/<session-id>.json`. Writes are atomic (write to `.tmp`, then rename). Sessions reload on restart and appear in the left panel in reverse chronological order.
 
-### Canvas Runtime (SPEC-2)
+### UI Catalog and Canvas Runtime
 
-- Embedded fixture schema loaded from `src/ui/fixture.json`
-- Schema deserialized into strongly typed Rust models
-- Validation gate before rendering:
-  - allowlisted component kinds only
-  - supported form field kinds only (`text`, `number`, `select`, `checkbox`)
-  - max component count and nesting depth
-  - button output-contract mapping required
-- Rendering uses typed enum dispatch (no string-fallback renderer path)
+- Builtin templates are embedded in the binary (`src/ui/catalog_builtin/*.json`) and loaded through a read-only provider
+- User templates are loaded from a writable local catalog directory at `<workspace>/.brownie/catalog/*.json`
+- Canvas components are not rendered by default; rendering is intent-gated
+- A single tool interface (`query_ui_catalog`) is used by the assistant to query catalog/UI capabilities
+- Template resolution is deterministic:
+  - exact match on `UiIntent.primary`
+  - secondary ranking via `operations` and `tags`
+  - stable precedence order (`user` over `builtin`; `org` slot reserved when enabled)
+- Template documents must validate (`meta`, `match`, `schema`) before they become selectable
+- Selected template schema is deserialized into typed Rust models and validated before render
+- Canvas render path uses typed enum dispatch (no string-fallback renderer path)
+- No silent fallback: if no template matches, the UI explicitly shows `No matching UI template found`
+- On no-match, a provisional template may be rendered; the user can save it to catalog from the Canvas prompt
+- Resolution and selection are logged in diagnostics (selected template/source/score or no-match reason)
 - Interactions emit typed `UiEvent` values shown in an append-only event log
 
 ## Project Structure
@@ -79,23 +85,26 @@ Sessions are stored as JSON files at `~/.brownie/sessions/<session-id>.json`. Wr
 src/
   main.rs          — entry point; instruction file detection; eframe wiring
   app.rs           — egui App shell; chat + runtime canvas integration
-  event.rs         — AppEvent enum bridging async SDK events to the UI thread
-  copilot/mod.rs   — CopilotClient; SDK lifecycle; streaming event mapping
+  event.rs         — AppEvent enum bridging async SDK events + tool-driven canvas renders to the UI thread
+  copilot/mod.rs   — CopilotClient; SDK lifecycle; `query_ui_catalog` tool registration + handler
   theme.rs         — centralized visual tokens (surfaces, accents, spacing, radii)
   session/
     mod.rs         — SessionMeta and Message types
     store.rs       — atomic filesystem persistence (~/.brownie/sessions/)
   ui/
+    catalog.rs     — catalog providers, deterministic template resolver, resolution traces, and user-template upsert
+    catalog_builtin/
+      *.json       — embedded builtin template documents
     schema.rs      — typed UiSchema + validation rules + validation tests
     registry.rs    — typed component allowlist + enum-based render dispatch
     runtime.rs     — runtime loader/validator/renderer orchestration + event-order test
     event.rs       — typed UiEvent models and event log helpers
-    fixture.json   — deterministic embedded schema fixture for SPEC-2
+    fixture.json   — development/test schema fixture
 vendor/
   copilot-sdk-rust/  — community Rust SDK (git submodule)
 ```
 
-## SPEC-2 Scope
+## Current Release Scope
 
 What works:
 
@@ -105,19 +114,30 @@ What works:
 - Passive mode enforced unconditionally
 - Connection status visible in the top bar; errors and suppressed tool calls in the diagnostics panel
 - Session transcript persisted locally and reloadable from the session list
-- Runtime-driven right panel Canvas rendered from validated typed schema
+- Catalog-driven right panel Canvas rendered from validated typed template schema
+- Deterministic intent-to-template resolution with transparent diagnostics
+- Single assistant tool interface (`query_ui_catalog`) for UI catalog lookup/render decisions
+- Embedded builtin catalog templates plus writable user catalog templates
+- Builtin file-listing template rendered in Canvas from workspace state
+- Provisional template render path with explicit "Save to Catalog" user confirmation
+- Explicit no-match handling (`No matching UI template found`)
 - Typed UI event emission and append-only debug/event log
 - Centralized tokenized visual styling across shell panels and controls
 
 What is explicitly **not** in this release:
 
 - Active mode and tool approval
-- Copilot-driven UI intent resolution, catalog/template lookup, or schema generation
+- Broad arbitrary tool execution from the model (only `query_ui_catalog` is exposed)
 - Workspace selector (uses CWD; manual override planned for a later spec)
+- Full org catalog provider implementation (provider slot is reserved)
 
 ## Configuration
 
-No config file yet — planned for `~/.brownie/config.toml` in a later spec.
+No config file yet — planned for `~/.brownie/config.toml` in a later release.
+
+Catalog paths:
+- Builtin catalog: embedded assets under `src/ui/catalog_builtin/`
+- User catalog: `<workspace>/.brownie/catalog/`
 
 `copilot` must be discoverable on PATH for SDK startup.
 

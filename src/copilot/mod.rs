@@ -1,8 +1,15 @@
 use crate::event::AppEvent;
-use copilot_sdk::{Client, ConnectionState, Session, SessionConfig, SessionEventData};
+use crate::ui::catalog::{CatalogManager, TemplateDocument, TemplateMatch, TemplateMeta, UiIntent};
+use copilot_sdk::{
+    Client, ConnectionState, Session, SessionConfig, SessionEventData, SystemMessageConfig,
+    SystemMessageMode, Tool, ToolHandler, ToolResultObject,
+};
+use serde_json::json;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::runtime::Handle;
 use tokio::sync::RwLock;
 use tokio::time::{self, Duration};
@@ -18,6 +25,139 @@ pub struct CopilotClient {
 }
 
 impl CopilotClient {
+    fn brownie_system_message() -> &'static str {
+        "You are the assistant inside the Brownie desktop app, not a standalone terminal-only chat.
+
+UI model:
+- Brownie has three panes: Workspace, Chat, and Canvas.
+- Canvas is rendered by the host app from validated UiSchema templates selected by intent.
+- You cannot directly draw arbitrary graphics, but users do have a Canvas surface you should refer to when asked about UI.
+
+Current Canvas capabilities:
+- code_review template: markdown, form fields, diff, action buttons
+- plan_review template: markdown, form fields, action button
+- file_listing template: workspace file listing rendered in canvas
+
+Behavior requirements:
+- Do not claim there is no canvas or that the UI is terminal-only.
+- Use the `query_ui_catalog` tool for requests about showing UI in canvas.
+- If `query_ui_catalog` reports `rendered_catalog` or `rendered_provisional`, confirm what was rendered.
+- If `query_ui_catalog` reports `needs_save_confirmation=true`, ask the user whether to save the provisional template to catalog.
+- If a requested UI is not supported by current templates, say it is not currently available instead of inventing capabilities."
+    }
+
+    fn query_ui_catalog_tool() -> Tool {
+        Tool::new("query_ui_catalog")
+            .description("Resolve, render, and optionally provision a canvas UI template from the Brownie catalog")
+            .schema(json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "User request to evaluate against the UI catalog"
+                    },
+                    "allow_provisional": {
+                        "type": "boolean",
+                        "description": "When no catalog template matches, create and render a provisional template",
+                        "default": true
+                    }
+                },
+                "required": ["query"]
+            }))
+    }
+
+    fn query_ui_catalog_handler(workspace: PathBuf, tx: mpsc::Sender<AppEvent>) -> ToolHandler {
+        Arc::new(move |_name, args| {
+            let query = args
+                .get("query")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .unwrap_or("");
+            if query.is_empty() {
+                return ToolResultObject::error("query_ui_catalog requires a non-empty `query`");
+            }
+
+            let allow_provisional = args
+                .get("allow_provisional")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(true);
+
+            let Some(intent) = intent_from_query(query) else {
+                return ToolResultObject::text(
+                    json!({
+                        "status": "text_only",
+                        "message": "No UI intent detected for query. Reply in text.",
+                        "query": query
+                    })
+                    .to_string(),
+                );
+            };
+
+            let user_catalog_dir = workspace.join(".brownie").join("catalog");
+            let catalog_manager = CatalogManager::with_default_providers(user_catalog_dir, false);
+            let resolution = catalog_manager.resolve(&intent);
+
+            if let Some(template) = resolution.selected {
+                let event = AppEvent::CanvasToolRender {
+                    intent: intent.clone(),
+                    template_id: template.document.meta.id.clone(),
+                    title: template.document.meta.title.clone(),
+                    provider_id: template.source.provider_id.clone(),
+                    provider_kind: template.source.kind.as_str().to_string(),
+                    schema: template.schema_value().clone(),
+                    provisional_template: None,
+                };
+                let _ = tx.send(event);
+
+                return ToolResultObject::text(
+                    json!({
+                        "status": "rendered_catalog",
+                        "intent": intent.summary(),
+                        "template_id": template.document.meta.id,
+                        "title": template.document.meta.title,
+                        "provider": template.source.provider_id,
+                        "needs_save_confirmation": false
+                    })
+                    .to_string(),
+                );
+            }
+
+            if !allow_provisional {
+                return ToolResultObject::text(
+                    json!({
+                        "status": "text_only",
+                        "intent": intent.summary(),
+                        "message": "No matching catalog template and provisional creation is disabled."
+                    })
+                    .to_string(),
+                );
+            }
+
+            let provisional = build_provisional_template(query, &intent);
+            let event = AppEvent::CanvasToolRender {
+                intent: intent.clone(),
+                template_id: provisional.meta.id.clone(),
+                title: provisional.meta.title.clone(),
+                provider_id: "runtime-provisional".to_string(),
+                provider_kind: "provisional".to_string(),
+                schema: provisional.schema.clone(),
+                provisional_template: Some(provisional.clone()),
+            };
+            let _ = tx.send(event);
+
+            ToolResultObject::text(
+                json!({
+                    "status": "rendered_provisional",
+                    "intent": intent.summary(),
+                    "template_id": provisional.meta.id,
+                    "title": provisional.meta.title,
+                    "needs_save_confirmation": true
+                })
+                .to_string(),
+            )
+        })
+    }
+
     pub fn new(workspace: PathBuf, tx: mpsc::Sender<AppEvent>) -> copilot_sdk::Result<Self> {
         let runtime_handle = Handle::try_current().map_err(|err| {
             copilot_sdk::CopilotError::InvalidConfig(format!("tokio runtime unavailable: {err}"))
@@ -27,7 +167,6 @@ impl CopilotClient {
             .use_stdio(true)
             .auto_restart(true)
             .cwd(workspace.clone())
-            .deny_tools(vec!["*"])
             .build()?;
 
         Ok(Self {
@@ -82,11 +221,31 @@ impl CopilotClient {
                 }
             }
 
-            let mut session_config = SessionConfig::default();
+            let query_ui_catalog_tool = Self::query_ui_catalog_tool();
+            let mut session_config = SessionConfig {
+                tools: vec![query_ui_catalog_tool.clone()],
+                available_tools: Some(vec!["query_ui_catalog".to_string()]),
+                excluded_tools: Some(vec![
+                    "shell".to_string(),
+                    "powershell".to_string(),
+                    "write".to_string(),
+                ]),
+                request_permission: Some(false),
+                system_message: Some(SystemMessageConfig {
+                    mode: Some(SystemMessageMode::Append),
+                    content: Some(Self::brownie_system_message().to_string()),
+                }),
+                ..Default::default()
+            };
             session_config.working_directory = Some(workspace.to_string_lossy().to_string());
 
             match client.create_session(session_config).await {
                 Ok(session) => {
+                    let handler = Self::query_ui_catalog_handler(workspace.clone(), tx.clone());
+                    session
+                        .register_tool_with_handler(query_ui_catalog_tool, Some(handler))
+                        .await;
+
                     let session_id = session.session_id().to_string();
                     {
                         let mut slot = session_slot.write().await;
@@ -176,10 +335,14 @@ impl CopilotClient {
                             let _ = tx.send(AppEvent::SdkError(err.message));
                         }
                         SessionEventData::ToolUserRequested(data) => {
-                            let _ = tx.send(AppEvent::ToolCallSuppressed(data.tool_name));
+                            if data.tool_name != "query_ui_catalog" {
+                                let _ = tx.send(AppEvent::ToolCallSuppressed(data.tool_name));
+                            }
                         }
                         SessionEventData::ToolExecutionStart(data) => {
-                            let _ = tx.send(AppEvent::ToolCallSuppressed(data.tool_name));
+                            if data.tool_name != "query_ui_catalog" {
+                                let _ = tx.send(AppEvent::ToolCallSuppressed(data.tool_name));
+                            }
                         }
                         _ => {}
                     },
@@ -193,5 +356,150 @@ impl CopilotClient {
                 }
             }
         });
+    }
+}
+
+fn intent_from_query(query: &str) -> Option<UiIntent> {
+    let lowered = query.to_ascii_lowercase();
+    let primary = if lowered.contains("list files")
+        || lowered.contains("listing of files")
+        || lowered.contains("file tree")
+        || lowered.contains("directory tree")
+        || lowered.contains("show files")
+        || lowered.contains("show me files")
+        || (lowered.contains("files") && lowered.contains("canvas"))
+    {
+        "file_listing".to_string()
+    } else if lowered.contains("plan")
+        || lowered.contains("roadmap")
+        || lowered.contains("milestone")
+    {
+        "plan_review".to_string()
+    } else if lowered.contains("ui") && lowered.contains("design") {
+        "ui_design_review".to_string()
+    } else if lowered.contains("review")
+        || lowered.contains("approve")
+        || lowered.contains("reject")
+        || lowered.contains("decline")
+        || lowered.contains("spec")
+        || lowered.contains("diff")
+        || lowered.contains("patch")
+        || lowered.contains("security")
+    {
+        "code_review".to_string()
+    } else {
+        return None;
+    };
+
+    let mut operations = BTreeSet::new();
+    if lowered.contains("approve") {
+        operations.insert("approve".to_string());
+    }
+    if lowered.contains("reject") || lowered.contains("decline") {
+        operations.insert("reject".to_string());
+    }
+    if lowered.contains("revise") || lowered.contains("change") {
+        operations.insert("revise".to_string());
+    }
+    if operations.is_empty() {
+        if primary == "file_listing" {
+            operations.insert("list".to_string());
+        } else if primary == "code_review" {
+            operations.insert("review".to_string());
+        }
+    }
+
+    let mut tags = BTreeSet::new();
+    if lowered.contains("spec") {
+        tags.insert("spec".to_string());
+    }
+    if lowered.contains("diff") || lowered.contains("patch") {
+        tags.insert("diff".to_string());
+    }
+    if lowered.contains("security") {
+        tags.insert("security".to_string());
+    }
+    if lowered.contains("plan") || lowered.contains("roadmap") {
+        tags.insert("plan".to_string());
+    }
+    if primary == "file_listing" {
+        tags.insert("files".to_string());
+        tags.insert("workspace".to_string());
+        if lowered.contains("tree") {
+            tags.insert("tree".to_string());
+        }
+    }
+
+    Some(UiIntent::new(
+        primary,
+        operations.into_iter().collect(),
+        tags.into_iter().collect(),
+    ))
+}
+
+fn provisional_template_id(intent: &UiIntent) -> String {
+    let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_millis(),
+        Err(_) => 0,
+    };
+    format!(
+        "provisional.{}.{}",
+        sanitize_identifier(&intent.primary),
+        now
+    )
+}
+
+fn sanitize_identifier(raw: &str) -> String {
+    let mut out = String::new();
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            out.push(ch.to_ascii_lowercase());
+        }
+        if out.len() >= 32 {
+            break;
+        }
+    }
+    if out.is_empty() {
+        "ui".to_string()
+    } else {
+        out
+    }
+}
+
+fn build_provisional_template(query: &str, intent: &UiIntent) -> TemplateDocument {
+    let template_id = provisional_template_id(intent);
+    let title = format!("Provisional {}", intent.primary.replace('_', " "));
+    let mut components = vec![json!({
+        "id": "provisional_intro",
+        "kind": "markdown",
+        "text": format!("### Provisional Canvas\\n{}", query.trim())
+    })];
+
+    if intent.primary == "file_listing" {
+        components.push(json!({
+            "id": "workspace_tree",
+            "kind": "code",
+            "language": "text",
+            "code": "__WORKSPACE_TREE__"
+        }));
+    }
+
+    TemplateDocument {
+        meta: TemplateMeta {
+            id: template_id,
+            title,
+            version: "0.1.0".to_string(),
+            tags: intent.tags.clone(),
+        },
+        match_rules: TemplateMatch {
+            primary: intent.primary.clone(),
+            operations: intent.operations.clone(),
+            tags: intent.tags.clone(),
+        },
+        schema: json!({
+            "schema_version": 1,
+            "outputs": [],
+            "components": components,
+        }),
     }
 }

@@ -3,11 +3,13 @@ use crate::event::AppEvent;
 use crate::session::store;
 use crate::session::{Message, SessionMeta, SCHEMA_VERSION};
 use crate::theme::Theme;
-use crate::ui::catalog::{CatalogManager, UiIntent};
+use crate::ui::catalog::{CatalogManager, TemplateDocument, UiIntent};
 use crate::ui::runtime::UiRuntime;
 use copilot_sdk::ConnectionState;
 use eframe::egui::{self, Align, Frame, RichText, ScrollArea, Stroke};
+use serde_json::Value;
 use std::collections::BTreeSet;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -38,9 +40,10 @@ pub struct BrownieApp {
     theme: Theme,
     ui_runtime: UiRuntime,
     catalog_manager: CatalogManager,
-    active_intent: UiIntent,
+    active_intent: Option<UiIntent>,
     selected_template: Option<TemplateSelectionContext>,
     no_matching_template: bool,
+    pending_provisional_template: Option<TemplateDocument>,
 }
 
 impl BrownieApp {
@@ -52,7 +55,6 @@ impl BrownieApp {
     ) -> Self {
         let user_catalog_dir = workspace.join(".brownie").join("catalog");
         let catalog_manager = CatalogManager::with_default_providers(user_catalog_dir, false);
-        let active_intent = Self::default_intent();
         let (sessions, warnings) = store::load_all();
         let mut app = Self {
             rx,
@@ -72,9 +74,10 @@ impl BrownieApp {
             theme: Theme::default(),
             ui_runtime: UiRuntime::new(),
             catalog_manager,
-            active_intent,
+            active_intent: None,
             selected_template: None,
             no_matching_template: false,
+            pending_provisional_template: None,
         };
 
         let catalog_diagnostics = app
@@ -91,7 +94,6 @@ impl BrownieApp {
             app.apply_event(AppEvent::SdkError(warning), None);
         }
 
-        app.resolve_canvas_for_intent(app.active_intent.clone());
         app
     }
 
@@ -160,8 +162,12 @@ impl BrownieApp {
         if prompt.is_empty() {
             return;
         }
-        let intent = Self::intent_from_prompt(&prompt);
-        self.resolve_canvas_for_intent(intent);
+        if let Some(intent) = Self::intent_from_prompt(&prompt) {
+            self.resolve_canvas_for_intent(intent);
+        } else {
+            self.clear_canvas_intent();
+            self.log_diagnostic("catalog resolve skipped: no intent detected");
+        }
 
         let message = Message {
             role: "user".to_string(),
@@ -183,26 +189,40 @@ impl BrownieApp {
         ctx.request_repaint();
     }
 
-    fn default_intent() -> UiIntent {
-        UiIntent::new(
-            "code_review",
-            vec![
-                "review".to_string(),
-                "approve".to_string(),
-                "reject".to_string(),
-            ],
-            vec!["spec".to_string(), "diff".to_string()],
-        )
-    }
-
-    fn intent_from_prompt(prompt: &str) -> UiIntent {
+    fn intent_from_prompt(prompt: &str) -> Option<UiIntent> {
         let lowered = prompt.to_ascii_lowercase();
-        let primary = if lowered.contains("plan") || lowered.contains("roadmap") {
-            "plan_review"
+        let primary = if lowered.contains("list files")
+            || lowered.contains("listing of files")
+            || lowered.contains("file tree")
+            || lowered.contains("directory tree")
+            || lowered.contains("show files")
+            || lowered.contains("show me files")
+            || lowered.contains("all the files")
+            || lowered.contains("all files")
+            || lowered.contains("workspace files")
+            || (lowered.contains("files") && lowered.contains("canvas"))
+            || (lowered.contains("files") && lowered.contains("workspace"))
+        {
+            "file_listing".to_string()
+        } else if lowered.contains("plan")
+            || lowered.contains("roadmap")
+            || lowered.contains("milestone")
+        {
+            "plan_review".to_string()
         } else if lowered.contains("ui") && lowered.contains("design") {
-            "ui_design_review"
+            "ui_design_review".to_string()
+        } else if lowered.contains("review")
+            || lowered.contains("approve")
+            || lowered.contains("reject")
+            || lowered.contains("decline")
+            || lowered.contains("spec")
+            || lowered.contains("diff")
+            || lowered.contains("patch")
+            || lowered.contains("security")
+        {
+            "code_review".to_string()
         } else {
-            "code_review"
+            return None;
         };
 
         let mut operations = BTreeSet::new();
@@ -216,7 +236,11 @@ impl BrownieApp {
             operations.insert("revise".to_string());
         }
         if operations.is_empty() {
-            operations.insert("review".to_string());
+            if primary == "file_listing" {
+                operations.insert("list".to_string());
+            } else if primary == "code_review" {
+                operations.insert("review".to_string());
+            }
         }
 
         let mut tags = BTreeSet::new();
@@ -232,12 +256,31 @@ impl BrownieApp {
         if lowered.contains("plan") || lowered.contains("roadmap") {
             tags.insert("plan".to_string());
         }
+        if primary == "file_listing" {
+            tags.insert("files".to_string());
+            tags.insert("workspace".to_string());
+            if lowered.contains("tree") {
+                tags.insert("tree".to_string());
+            }
+        }
 
-        UiIntent::new(primary, operations.into_iter().collect(), tags.into_iter().collect())
+        Some(UiIntent::new(
+            primary,
+            operations.into_iter().collect(),
+            tags.into_iter().collect(),
+        ))
+    }
+
+    fn clear_canvas_intent(&mut self) {
+        self.active_intent = None;
+        self.selected_template = None;
+        self.no_matching_template = false;
+        self.pending_provisional_template = None;
+        self.ui_runtime.clear_schema();
     }
 
     fn resolve_canvas_for_intent(&mut self, intent: UiIntent) {
-        self.active_intent = intent.clone();
+        self.active_intent = Some(intent.clone());
         let resolution = self.catalog_manager.resolve(&intent);
         for line in resolution.trace.diagnostic_lines() {
             self.log_diagnostic(line);
@@ -245,6 +288,7 @@ impl BrownieApp {
 
         if let Some(template) = resolution.selected {
             self.no_matching_template = false;
+            self.pending_provisional_template = None;
             self.selected_template = Some(TemplateSelectionContext {
                 template_id: template.document.meta.id.clone(),
                 title: template.document.meta.title.clone(),
@@ -252,7 +296,11 @@ impl BrownieApp {
                 provider_kind: template.source.kind.as_str().to_string(),
             });
 
-            if let Err(err) = self.ui_runtime.load_schema_value(template.schema_value()) {
+            let schema = self.materialize_template_schema(
+                template.document.meta.id.as_str(),
+                template.schema_value(),
+            );
+            if let Err(err) = self.ui_runtime.load_schema_value(&schema) {
                 self.log_diagnostic(format!("catalog runtime error: {err}"));
             }
         } else {
@@ -260,6 +308,98 @@ impl BrownieApp {
             self.no_matching_template = true;
             self.ui_runtime.clear_schema();
         }
+    }
+
+    fn save_pending_provisional_template(&mut self) {
+        let Some(template) = self.pending_provisional_template.clone() else {
+            return;
+        };
+
+        match self.catalog_manager.upsert_user_template(&template) {
+            Ok(()) => {
+                self.log_diagnostic(format!(
+                    "saved provisional template to user catalog: {}",
+                    template.meta.id
+                ));
+                self.pending_provisional_template = None;
+                let intent = UiIntent::new(
+                    template.match_rules.primary,
+                    template.match_rules.operations,
+                    template.match_rules.tags,
+                );
+                self.resolve_canvas_for_intent(intent);
+            }
+            Err(err) => {
+                self.log_diagnostic(format!("failed to save provisional template: {err}"));
+            }
+        }
+    }
+
+    fn materialize_template_schema(&self, template_id: &str, schema: &Value) -> Value {
+        if template_id != "builtin.file_listing.default" {
+            return schema.clone();
+        }
+
+        let mut materialized = schema.clone();
+        let listing = self.workspace_root_listing();
+        if let Some(components) = materialized
+            .get_mut("components")
+            .and_then(|value| value.as_array_mut())
+        {
+            for component in components {
+                let is_workspace_tree = component
+                    .get("id")
+                    .and_then(|value| value.as_str())
+                    .map(|id| id == "workspace_tree")
+                    .unwrap_or(false);
+                if is_workspace_tree {
+                    if let Some(code) = component.get_mut("code") {
+                        *code = Value::String(listing.clone());
+                    }
+                }
+            }
+        }
+
+        materialized
+    }
+
+    fn workspace_root_listing(&self) -> String {
+        let root_name = self
+            .workspace
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("workspace");
+
+        let mut entries = Vec::new();
+        match fs::read_dir(&self.workspace) {
+            Ok(read_dir) => {
+                for entry in read_dir.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    let is_dir = entry
+                        .file_type()
+                        .map(|value| value.is_dir())
+                        .unwrap_or(false);
+                    entries.push((name, is_dir));
+                }
+            }
+            Err(err) => {
+                return format!("{root_name}/\n└── <failed to read workspace: {err}>");
+            }
+        }
+
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        let mut lines = vec![format!("{root_name}/")];
+        for (index, (name, is_dir)) in entries.iter().enumerate() {
+            let branch = if index + 1 == entries.len() {
+                "└──"
+            } else {
+                "├──"
+            };
+            let suffix = if *is_dir { "/" } else { "" };
+            lines.push(format!("{branch} {name}{suffix}"));
+        }
+
+        lines.join("\n")
     }
 
     fn open_session(&mut self, session_id: &str) {
@@ -363,6 +503,33 @@ impl BrownieApp {
             }
             AppEvent::ToolCallSuppressed(tool_name) => {
                 self.log_diagnostic(format!("tool call suppressed (passive mode): {tool_name}"));
+            }
+            AppEvent::CanvasToolRender {
+                intent,
+                template_id,
+                title,
+                provider_id,
+                provider_kind,
+                schema,
+                provisional_template,
+            } => {
+                self.active_intent = Some(intent);
+                self.no_matching_template = false;
+                self.selected_template = Some(TemplateSelectionContext {
+                    template_id: template_id.clone(),
+                    title,
+                    provider_id,
+                    provider_kind,
+                });
+                self.pending_provisional_template = provisional_template;
+
+                let schema = self.materialize_template_schema(&template_id, &schema);
+                if let Err(err) = self.ui_runtime.load_schema_value(&schema) {
+                    self.log_diagnostic(format!("canvas tool render failed: {err}"));
+                }
+                if let Some(ctx) = ctx {
+                    ctx.request_repaint();
+                }
             }
         }
     }
@@ -568,9 +735,12 @@ impl BrownieApp {
                     );
                     ui.add_space(Theme::P8);
                     ui.label(
-                        RichText::new(format!("Intent: {}", self.active_intent.summary()))
-                            .size(12.0)
-                            .color(self.theme.text_muted),
+                        RichText::new(match &self.active_intent {
+                            Some(intent) => format!("Intent: {}", intent.summary()),
+                            None => "Intent: none".to_string(),
+                        })
+                        .size(12.0)
+                        .color(self.theme.text_muted),
                     );
                     if let Some(selection) = &self.selected_template {
                         ui.label(
@@ -600,7 +770,13 @@ impl BrownieApp {
                             .color(self.theme.text_primary),
                     );
                     ui.add_space(Theme::P8);
-                    if self.no_matching_template {
+                    if self.active_intent.is_none() {
+                        ui.label(
+                            RichText::new("No UI intent selected")
+                                .size(13.0)
+                                .color(self.theme.text_muted),
+                        );
+                    } else if self.no_matching_template {
                         ui.label(
                             RichText::new("No matching UI template found")
                                 .size(13.0)
@@ -611,9 +787,46 @@ impl BrownieApp {
                     }
                 });
 
+                let mut save_provisional = false;
+                let mut dismiss_provisional = false;
+                if let Some(template) = &self.pending_provisional_template {
+                    self.theme.card_frame().show(ui, |ui| {
+                        ui.label(
+                            RichText::new("Provisional Template")
+                                .strong()
+                                .size(14.0)
+                                .color(self.theme.text_primary),
+                        );
+                        ui.add_space(Theme::P8);
+                        ui.label(
+                            RichText::new(format!(
+                                "Save '{}' to your user UI catalog?",
+                                template.meta.title
+                            ))
+                            .size(12.0)
+                            .color(self.theme.text_muted),
+                        );
+                        ui.add_space(Theme::P8);
+                        ui.horizontal(|ui| {
+                            if ui.add(self.primary_button("Save to Catalog")).clicked() {
+                                save_provisional = true;
+                            }
+                            if ui.add(self.secondary_button("Not Now")).clicked() {
+                                dismiss_provisional = true;
+                            }
+                        });
+                    });
+                }
+
                 self.theme.card_frame().show(ui, |ui| {
                     self.ui_runtime.render_event_log(ui, &self.theme);
                 });
+
+                if save_provisional {
+                    self.save_pending_provisional_template();
+                } else if dismiss_provisional {
+                    self.pending_provisional_template = None;
+                }
             });
     }
 

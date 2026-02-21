@@ -107,11 +107,22 @@ impl Theme {
         style.visuals = visuals;
         style.spacing.item_spacing = egui::vec2(10.0, 10.0);
         style.spacing.button_padding = egui::vec2(12.0, 8.0);
-        style.text_styles.insert(TextStyle::Heading, FontId::proportional(17.0));
-        style.text_styles.insert(TextStyle::Name("section".into()), FontId::proportional(14.0));
-        style.text_styles.insert(TextStyle::Body, FontId::proportional(14.0));
-        style.text_styles.insert(TextStyle::Monospace, FontId::monospace(13.0));
-        style.text_styles.insert(TextStyle::Small, FontId::proportional(12.0));
+        style
+            .text_styles
+            .insert(TextStyle::Heading, FontId::proportional(17.0));
+        style.text_styles.insert(
+            TextStyle::Name("section".into()),
+            FontId::proportional(14.0),
+        );
+        style
+            .text_styles
+            .insert(TextStyle::Body, FontId::proportional(14.0));
+        style
+            .text_styles
+            .insert(TextStyle::Monospace, FontId::monospace(13.0));
+        style
+            .text_styles
+            .insert(TextStyle::Small, FontId::proportional(12.0));
         ctx.set_style(style);
     }
 

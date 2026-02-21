@@ -1,0 +1,46 @@
+{
+  "meta": {
+    "id": "builtin.file_listing.default",
+    "title": "Workspace Explorer (Read-Only)",
+    "version": "1.0.0",
+    "tags": ["files", "tree", "workspace"]
+  },
+  "match": {
+    "primary": "file_listing",
+    "operations": ["browse", "list", "view"],
+    "tags": ["files", "tree", "workspace"]
+  },
+  "schema": {
+    "schema_version": 1,
+    "outputs": [],
+    "components": [
+      {
+        "id": "explorer_intro",
+        "kind": "markdown",
+        "text": "### Workspace Explorer\\nRead-only file manager view with directory tree indicators."
+      },
+      {
+        "id": "tree_legend",
+        "kind": "markdown",
+        "text": "**Legend**\\n`▼` expanded directory · `▶` collapsed directory · plain rows are files."
+      },
+      {
+        "id": "workspace_tree",
+        "kind": "code",
+        "language": "text",
+        "code": "▼ .\\n  ▼ src/\\n    app.rs\\n    event.rs\\n    main.rs\\n    theme.rs\\n    ▶ copilot/\\n    ▶ session/\\n    ▼ ui/\\n      catalog.rs\\n      event.rs\\n      registry.rs\\n      runtime.rs\\n      schema.rs\\n  ▼ specs/\\n    base-spec.md\\n    spec-ui.md\\n    spec-ui-style.md\\n  ▼ images/\\n    Brownie-small.png\\n    brownie-ui.png\\n  ▶ target/\\n  README.md\\n  Cargo.toml\\n  Cargo.lock"
+      },
+      {
+        "id": "preview_intro",
+        "kind": "markdown",
+        "text": "#### File Preview\\nCurrent selection: `src/ui/catalog.rs` (view-only)."
+      },
+      {
+        "id": "file_preview",
+        "kind": "code",
+        "language": "rust",
+        "code": "pub struct CatalogManager {\\n    providers: Vec<Box<dyn CatalogProvider>>,\\n    templates: Vec<CatalogTemplate>,\\n    load_diagnostics: Vec<CatalogLoadDiagnostic>,\\n    org_enabled: bool,\\n}\\n\\nimpl CatalogManager {\\n    pub fn resolve(&self, intent: &UiIntent) -> ResolutionResult {\\n        // deterministic provider precedence + ranking\\n        // ...\\n    }\\n}"
+      }
+    ]
+  }
+}

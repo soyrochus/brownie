@@ -142,13 +142,12 @@ impl ComponentRegistry {
                         theme.text_primary,
                     ),
                 };
-                let button_widget = egui::Button::new(
-                    RichText::new(&button.label).color(text_color).size(13.0),
-                )
-                .fill(fill)
-                .stroke(stroke)
-                .corner_radius(egui::CornerRadius::same(theme.radius_8))
-                .min_size(egui::vec2(0.0, theme.button_height));
+                let button_widget =
+                    egui::Button::new(RichText::new(&button.label).color(text_color).size(13.0))
+                        .fill(fill)
+                        .stroke(stroke)
+                        .corner_radius(egui::CornerRadius::same(theme.radius_8))
+                        .min_size(egui::vec2(0.0, theme.button_height));
 
                 if ui.add(button_widget).clicked() {
                     emit(UiEvent::ButtonClicked {

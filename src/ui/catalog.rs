@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 const BUILTIN_CODE_REVIEW_TEMPLATE: &str = include_str!("catalog_builtin/code_review.json");
 const BUILTIN_PLAN_REVIEW_TEMPLATE: &str = include_str!("catalog_builtin/plan_review.json");
+const BUILTIN_FILE_LISTING_TEMPLATE: &str = include_str!("catalog_builtin/file_listing.json");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UiIntent {
@@ -147,7 +148,9 @@ impl CatalogLoadDiagnostic {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum CatalogError {
-    ReadOnlyProvider { provider_id: String },
+    ReadOnlyProvider {
+        provider_id: String,
+    },
     Io {
         provider_id: String,
         path: PathBuf,
@@ -211,7 +214,11 @@ impl BuiltinCatalogProvider {
                 kind: CatalogSourceKind::Builtin,
                 read_only: true,
             },
-            embedded_templates: vec![BUILTIN_CODE_REVIEW_TEMPLATE, BUILTIN_PLAN_REVIEW_TEMPLATE],
+            embedded_templates: vec![
+                BUILTIN_CODE_REVIEW_TEMPLATE,
+                BUILTIN_PLAN_REVIEW_TEMPLATE,
+                BUILTIN_FILE_LISTING_TEMPLATE,
+            ],
         }
     }
 }
@@ -449,7 +456,10 @@ impl CatalogManager {
 
     pub fn with_default_providers(user_catalog_dir: impl Into<PathBuf>, org_enabled: bool) -> Self {
         let providers: Vec<Box<dyn CatalogProvider>> = vec![
-            Box::new(UserCatalogProvider::new("user-local", user_catalog_dir.into())),
+            Box::new(UserCatalogProvider::new(
+                "user-local",
+                user_catalog_dir.into(),
+            )),
             Box::new(BuiltinCatalogProvider::default()),
         ];
         Self::new(providers, org_enabled)
@@ -486,6 +496,24 @@ impl CatalogManager {
 
     pub fn load_diagnostics(&self) -> &[CatalogLoadDiagnostic] {
         &self.load_diagnostics
+    }
+
+    pub fn upsert_user_template(
+        &mut self,
+        template: &TemplateDocument,
+    ) -> Result<(), CatalogError> {
+        for provider in &self.providers {
+            let source = provider.source();
+            if source.kind == CatalogSourceKind::User && !source.read_only {
+                provider.upsert_template(template)?;
+                self.reload();
+                return Ok(());
+            }
+        }
+
+        Err(CatalogError::ReadOnlyProvider {
+            provider_id: "user-local".to_string(),
+        })
     }
 
     pub fn resolve(&self, intent: &UiIntent) -> ResolutionResult {
@@ -550,8 +578,7 @@ impl CatalogManager {
             sorted.sort_by(rank_candidates);
             if let Some(best) = sorted.first() {
                 selected_tier_index = Some(tier_index);
-                selected_candidate_key =
-                    Some((best.template_id.clone(), best.provider_id.clone()));
+                selected_candidate_key = Some((best.template_id.clone(), best.provider_id.clone()));
                 selected = self
                     .templates
                     .iter()
@@ -685,7 +712,8 @@ fn parse_and_validate_template(
     let ui_schema: UiSchema = serde_json::from_value(document.schema.clone())
         .map_err(|err| format!("schema deserialize error: {err}"))?;
     let registry = ComponentRegistry::new();
-    validate_schema(&ui_schema, &registry).map_err(|err| format!("schema validation error: {err}"))?;
+    validate_schema(&ui_schema, &registry)
+        .map_err(|err| format!("schema validation error: {err}"))?;
 
     Ok(CatalogTemplate {
         document,
@@ -723,7 +751,11 @@ struct SecondaryScore {
 }
 
 fn score_secondary(intent: &UiIntent, template: &CatalogTemplate) -> SecondaryScore {
-    let intent_operations: BTreeSet<&str> = intent.operations.iter().map(|value| value.as_str()).collect();
+    let intent_operations: BTreeSet<&str> = intent
+        .operations
+        .iter()
+        .map(|value| value.as_str())
+        .collect();
     let intent_tags: BTreeSet<&str> = intent.tags.iter().map(|value| value.as_str()).collect();
 
     let template_operations: BTreeSet<&str> = template
@@ -744,13 +776,12 @@ fn score_secondary(intent: &UiIntent, template: &CatalogTemplate) -> SecondarySc
     let operation_overlap = template_operations.intersection(&intent_operations).count();
     let tag_overlap = template_tags.intersection(&intent_tags).count();
 
-    let exact_operation_bonus = if !template_operations.is_empty()
-        && template_operations == intent_operations
-    {
-        2
-    } else {
-        0
-    };
+    let exact_operation_bonus =
+        if !template_operations.is_empty() && template_operations == intent_operations {
+            2
+        } else {
+            0
+        };
     let exact_tag_bonus = if !template_tags.is_empty() && template_tags == intent_tags {
         1
     } else {
@@ -918,7 +949,9 @@ mod tests {
     #[test]
     fn builtin_provider_loads_embedded_templates() {
         let provider = BuiltinCatalogProvider::default();
-        let loaded = provider.load_templates().expect("builtin load should succeed");
+        let loaded = provider
+            .load_templates()
+            .expect("builtin load should succeed");
         assert!(loaded.diagnostics.is_empty());
         assert!(loaded.templates.len() >= 2);
     }
@@ -1067,12 +1100,8 @@ mod tests {
 
     #[test]
     fn resolver_secondary_overlap_and_tie_breaking_are_deterministic() {
-        let lower = sample_template_json(
-            "user.code_review.a",
-            "code_review",
-            &["approve"],
-            &["spec"],
-        );
+        let lower =
+            sample_template_json("user.code_review.a", "code_review", &["approve"], &["spec"]);
         let higher = sample_template_json(
             "user.code_review.b",
             "code_review",
@@ -1096,11 +1125,13 @@ mod tests {
         let first = manager.resolve(&intent);
         let second = manager.resolve(&intent);
         assert_eq!(
-            first.trace.selected_template_id,
-            second.trace.selected_template_id,
+            first.trace.selected_template_id, second.trace.selected_template_id,
             "same input should produce stable winner"
         );
-        assert_eq!(first.trace.ranked_candidates, second.trace.ranked_candidates);
+        assert_eq!(
+            first.trace.ranked_candidates,
+            second.trace.ranked_candidates
+        );
 
         let winner = first.selected.expect("winner should exist");
         assert_eq!(winner.template_id(), "user.code_review.b");
@@ -1108,7 +1139,8 @@ mod tests {
 
     #[test]
     fn resolver_returns_explicit_no_match_with_reasons() {
-        let providers: Vec<Box<dyn CatalogProvider>> = vec![Box::new(BuiltinCatalogProvider::default())];
+        let providers: Vec<Box<dyn CatalogProvider>> =
+            vec![Box::new(BuiltinCatalogProvider::default())];
         let manager = CatalogManager::new(providers, false);
         let intent = UiIntent::new("unmatched_primary", Vec::new(), Vec::new());
         let result = manager.resolve(&intent);
@@ -1121,7 +1153,8 @@ mod tests {
 
     #[test]
     fn selected_template_schema_loads_into_runtime() {
-        let providers: Vec<Box<dyn CatalogProvider>> = vec![Box::new(BuiltinCatalogProvider::default())];
+        let providers: Vec<Box<dyn CatalogProvider>> =
+            vec![Box::new(BuiltinCatalogProvider::default())];
         let manager = CatalogManager::new(providers, false);
         let intent = UiIntent::new(
             "code_review",
@@ -1135,6 +1168,30 @@ mod tests {
         runtime
             .load_schema_value(selected.schema_value())
             .expect("selected template schema should validate and load");
+        assert!(runtime.has_schema());
+        assert!(runtime.runtime_error().is_none());
+    }
+
+    #[test]
+    fn resolver_selects_builtin_file_listing_template() {
+        let providers: Vec<Box<dyn CatalogProvider>> =
+            vec![Box::new(BuiltinCatalogProvider::default())];
+        let manager = CatalogManager::new(providers, false);
+        let intent = UiIntent::new(
+            "file_listing",
+            vec!["list".to_string()],
+            vec!["files".to_string(), "workspace".to_string()],
+        );
+        let result = manager.resolve(&intent);
+        let selected = result
+            .selected
+            .expect("a builtin file listing template should match");
+        assert_eq!(selected.template_id(), "builtin.file_listing.default");
+
+        let mut runtime = UiRuntime::new();
+        runtime
+            .load_schema_value(selected.schema_value())
+            .expect("selected file listing schema should validate and load");
         assert!(runtime.has_schema());
         assert!(runtime.runtime_error().is_none());
     }
