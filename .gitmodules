@@ -1,3 +1,6 @@
 [submodule "vendor/copilot-sdk"]
 	path = vendor/copilot-sdk
 	url = https://github.com/github/copilot-sdk.git
+[submodule "vendor/copilot-sdk-rust"]
+	path = vendor/copilot-sdk-rust
+	url = https://github.com/copilot-community-sdk/copilot-sdk-rust
