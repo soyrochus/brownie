@@ -2,6 +2,8 @@ mod app;
 mod copilot;
 mod event;
 mod session;
+mod theme;
+mod ui;
 
 use app::BrownieApp;
 use copilot::CopilotClient;
@@ -93,10 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eframe::run_native(
         "Brownie",
         native_options,
-        Box::new(move |creation_context| {
-            creation_context.egui_ctx.set_visuals(egui::Visuals::dark());
-            Ok(Box::new(app))
-        }),
+        Box::new(move |_creation_context| Ok(Box::new(app))),
     )?;
 
     Ok(())

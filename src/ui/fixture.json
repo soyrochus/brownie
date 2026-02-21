@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "outputs": [
+    {
+      "component_id": "approve_btn",
+      "event_id": "action.approve"
+    },
+    {
+      "component_id": "reject_btn",
+      "event_id": "action.reject"
+    }
+  ],
+  "components": [
+    {
+      "id": "intro_md",
+      "kind": "markdown",
+      "text": "### SPEC-2 Canvas\\nDeterministic runtime rendering with typed events."
+    },
+    {
+      "id": "review_form",
+      "kind": "form",
+      "title": "Review Metadata",
+      "fields": [
+        {
+          "id": "summary",
+          "label": "Summary",
+          "kind": "text",
+          "default": "Canvas runtime validation pass"
+        },
+        {
+          "id": "risk_score",
+          "label": "Risk Score",
+          "kind": "number",
+          "default": 2
+        },
+        {
+          "id": "decision",
+          "label": "Decision",
+          "kind": "select",
+          "options": [
+            "approve",
+            "needs-changes",
+            "reject"
+          ],
+          "default": "approve"
+        },
+        {
+          "id": "notify_team",
+          "label": "Notify team",
+          "kind": "checkbox",
+          "default": true
+        }
+      ]
+    },
+    {
+      "id": "patch_diff",
+      "kind": "diff",
+      "lines": [
+        {
+          "kind": "removed",
+          "text": "- Dynamic UI will render here"
+        },
+        {
+          "kind": "added",
+          "text": "+ Runtime-driven canvas rendering is active"
+        }
+      ]
+    },
+    {
+      "id": "approve_btn",
+      "kind": "button",
+      "label": "Approve Plan",
+      "variant": "primary"
+    },
+    {
+      "id": "reject_btn",
+      "kind": "button",
+      "label": "Request Changes",
+      "variant": "secondary"
+    }
+  ]
+}
