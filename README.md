@@ -10,7 +10,7 @@
 
 Brownie is a native desktop application that embeds GitHub Copilot agentic workflows in a structured execution shell. It is not a sidebar. It is a surface where your AI assistant works alongside you — sends and receives messages in real time, runs in passive mode by default, and persists your sessions locally.
 
-This release (SPEC-1) establishes the execution backbone: a stable, observable connection to the Copilot CLI via the community Rust SDK, a three-column UI shell, streaming chat, and local session persistence. Dynamic UI rendering and the action canvas are coming in the next spec.
+This release (SPEC-2) builds on that execution backbone and adds a validated runtime-driven Canvas: typed `UiSchema` deserialization, strict validation before render, enum-based component rendering, and deterministic typed UI event logging.
 
 ## Prerequisites
 
@@ -49,9 +49,9 @@ The window is a three-column layout with a dark theme:
 | --- | --- | --- |
 | Left | **Workspace** | Active workspace path · detected instruction files (`.github/copilot-instructions.md`, `AGENTS.md`, `*.instructions.md`) · recent session list |
 | Center | **Chat** | Streaming conversation transcript · collapsible diagnostics log · input bar |
-| Right | **Actions Panel** | Placeholder — dynamic canvas in a future spec |
+| Right | **Canvas** | Runtime-rendered validated UI schema · append-only typed UI event log |
 
-**Top bar:** connection status (color-coded) · Passive Mode indicator · disabled Active Mode toggle.
+**Top bar:** centered connection status with semantic marker · Passive Mode indicator · disabled Active Mode toggle.
 
 ### Passive Mode
 
@@ -61,24 +61,43 @@ All tool calls are blocked at three independent layers: the CLI is started with 
 
 Sessions are stored as JSON files at `~/.brownie/sessions/<session-id>.json`. Writes are atomic (write to `.tmp`, then rename). Sessions reload on restart and appear in the left panel in reverse chronological order.
 
+### Canvas Runtime (SPEC-2)
+
+- Embedded fixture schema loaded from `src/ui/fixture.json`
+- Schema deserialized into strongly typed Rust models
+- Validation gate before rendering:
+  - allowlisted component kinds only
+  - supported form field kinds only (`text`, `number`, `select`, `checkbox`)
+  - max component count and nesting depth
+  - button output-contract mapping required
+- Rendering uses typed enum dispatch (no string-fallback renderer path)
+- Interactions emit typed `UiEvent` values shown in an append-only event log
+
 ## Project Structure
 
 ```text
 src/
   main.rs          — entry point; instruction file detection; eframe wiring
-  app.rs           — egui App; three-column layout; event drain loop
+  app.rs           — egui App shell; chat + runtime canvas integration
   event.rs         — AppEvent enum bridging async SDK events to the UI thread
   copilot/mod.rs   — CopilotClient; SDK lifecycle; streaming event mapping
+  theme.rs         — centralized visual tokens (surfaces, accents, spacing, radii)
   session/
     mod.rs         — SessionMeta and Message types
     store.rs       — atomic filesystem persistence (~/.brownie/sessions/)
+  ui/
+    schema.rs      — typed UiSchema + validation rules + validation tests
+    registry.rs    — typed component allowlist + enum-based render dispatch
+    runtime.rs     — runtime loader/validator/renderer orchestration + event-order test
+    event.rs       — typed UiEvent models and event log helpers
+    fixture.json   — deterministic embedded schema fixture for SPEC-2
 vendor/
   copilot-sdk-rust/  — community Rust SDK (git submodule)
 ```
 
-## SPEC-1 Scope
+## SPEC-2 Scope
 
-This release validates the execution spine. What works:
+What works:
 
 - Connect to Copilot CLI via the Rust SDK (stdio transport, auto-restart on crash)
 - Create a session bound to the current workspace
@@ -86,19 +105,21 @@ This release validates the execution spine. What works:
 - Passive mode enforced unconditionally
 - Connection status visible in the top bar; errors and suppressed tool calls in the diagnostics panel
 - Session transcript persisted locally and reloadable from the session list
+- Runtime-driven right panel Canvas rendered from validated typed schema
+- Typed UI event emission and append-only debug/event log
+- Centralized tokenized visual styling across shell panels and controls
 
 What is explicitly **not** in this release:
 
-- Dynamic canvas / UiSchema rendering (Actions Panel is a static placeholder)
 - Active mode and tool approval
-- UI catalog, intent resolution, template promotion
+- Copilot-driven UI intent resolution, catalog/template lookup, or schema generation
 - Workspace selector (uses CWD; manual override planned for a later spec)
 
 ## Configuration
 
 No config file yet — planned for `~/.brownie/config.toml` in a later spec.
 
-If your `copilot` binary is not on PATH, set `COPILOT_CLI_PATH` to its full path before launching Brownie.
+`copilot` must be discoverable on PATH for SDK startup.
 
 ## Principles of Participation
 
