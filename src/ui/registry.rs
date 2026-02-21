@@ -4,7 +4,7 @@ use crate::ui::schema::{
     field_key, ButtonStyle, ComponentKind, DiffLineKind, FormFieldKind, SchemaRegistry,
     ValidatedComponent, ValidatedFormField,
 };
-use eframe::egui::{self, Color32, RichText};
+use eframe::egui::{self, RichText};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub struct ComponentRegistry {
@@ -30,7 +30,7 @@ impl ComponentRegistry {
     ) {
         match component {
             ValidatedComponent::Markdown(markdown) => {
-                let frame = theme.panel_frame(theme.surface_2, theme.spacing_12 as i8);
+                let frame = theme.card_frame();
                 frame.show(ui, |ui| {
                     ui.label(
                         RichText::new(format!("id: {}", markdown.id))
@@ -47,7 +47,7 @@ impl ComponentRegistry {
                 self.render_children(component, ui, theme, form_state, emit);
             }
             ValidatedComponent::Form(form) => {
-                let frame = theme.panel_frame(theme.surface_2, theme.spacing_12 as i8);
+                let frame = theme.card_frame();
                 frame.show(ui, |ui| {
                     if let Some(title) = &form.title {
                         ui.label(RichText::new(title).color(theme.text_primary).size(13.0));
@@ -71,7 +71,7 @@ impl ComponentRegistry {
                 self.render_children(component, ui, theme, form_state, emit);
             }
             ValidatedComponent::Code(code) => {
-                let frame = theme.panel_frame(theme.surface_2, theme.spacing_12 as i8);
+                let frame = theme.card_frame();
                 frame.show(ui, |ui| {
                     ui.label(
                         RichText::new(format!("id: {}", code.id))
@@ -92,7 +92,7 @@ impl ComponentRegistry {
                 self.render_children(component, ui, theme, form_state, emit);
             }
             ValidatedComponent::Diff(diff) => {
-                let frame = theme.panel_frame(theme.surface_2, theme.spacing_12 as i8);
+                let frame = theme.card_frame();
                 frame.show(ui, |ui| {
                     ui.label(
                         RichText::new(format!("id: {}", diff.id))
@@ -102,19 +102,13 @@ impl ComponentRegistry {
                     ui.add_space(theme.spacing_4);
                     for line in &diff.lines {
                         let (fill, accent) = match line.kind {
-                            DiffLineKind::Added => (
-                                Color32::from_rgba_premultiplied(34, 197, 94, 38),
-                                theme.success,
-                            ),
-                            DiffLineKind::Removed => (
-                                Color32::from_rgba_premultiplied(239, 68, 68, 38),
-                                theme.danger,
-                            ),
+                            DiffLineKind::Added => (theme.diff_added_tint, theme.success),
+                            DiffLineKind::Removed => (theme.diff_removed_tint, theme.danger),
                             DiffLineKind::Context => (theme.surface_3, theme.border_subtle),
                         };
                         egui::Frame::new()
                             .fill(fill)
-                            .stroke(egui::Stroke::new(1.0, theme.border_subtle))
+                            .stroke(egui::Stroke::NONE)
                             .corner_radius(egui::CornerRadius::same(theme.radius_8))
                             .inner_margin(egui::Margin::symmetric(
                                 theme.spacing_8 as i8,
@@ -136,14 +130,20 @@ impl ComponentRegistry {
                 self.render_children(component, ui, theme, form_state, emit);
             }
             ValidatedComponent::Button(button) => {
-                let (fill, stroke) = match button.variant {
-                    ButtonStyle::Primary => (theme.accent_primary, egui::Stroke::NONE),
-                    ButtonStyle::Secondary => (theme.surface_2, theme.subtle_button_stroke()),
+                let (fill, stroke, text_color) = match button.variant {
+                    ButtonStyle::Primary => (
+                        theme.accent_primary,
+                        theme.primary_button_stroke(),
+                        theme.text_on_accent,
+                    ),
+                    ButtonStyle::Secondary => (
+                        theme.surface_2,
+                        theme.subtle_button_stroke(),
+                        theme.text_primary,
+                    ),
                 };
                 let button_widget = egui::Button::new(
-                    RichText::new(&button.label)
-                        .color(theme.text_primary)
-                        .size(13.0),
+                    RichText::new(&button.label).color(text_color).size(13.0),
                 )
                 .fill(fill)
                 .stroke(stroke)

@@ -145,6 +145,7 @@ impl CatalogLoadDiagnostic {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum CatalogError {
     ReadOnlyProvider { provider_id: String },
     Io {
@@ -182,12 +183,14 @@ pub trait CatalogProvider: Send + Sync {
 
     fn load_templates(&self) -> Result<CatalogLoadOutput, CatalogError>;
 
+    #[allow(dead_code)]
     fn upsert_template(&self, _template: &TemplateDocument) -> Result<(), CatalogError> {
         Err(CatalogError::ReadOnlyProvider {
             provider_id: self.source().provider_id,
         })
     }
 
+    #[allow(dead_code)]
     fn delete_template(&self, _template_id: &str) -> Result<(), CatalogError> {
         Err(CatalogError::ReadOnlyProvider {
             provider_id: self.source().provider_id,
@@ -263,6 +266,7 @@ impl UserCatalogProvider {
         }
     }
 
+    #[allow(dead_code)]
     fn template_path_for_id(&self, template_id: &str) -> PathBuf {
         self.root_dir
             .join(format!("{}.json", sanitize_filename(template_id)))
@@ -778,6 +782,7 @@ fn precedence_index(kind: CatalogSourceKind, precedence: &[CatalogSourceKind]) -
         .unwrap_or(usize::MAX)
 }
 
+#[allow(dead_code)]
 fn sanitize_filename(raw: &str) -> String {
     let mut output = String::with_capacity(raw.len());
     for ch in raw.chars() {

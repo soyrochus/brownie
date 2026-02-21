@@ -51,6 +51,7 @@ impl UiRuntime {
         self.form_state.clear();
     }
 
+    #[cfg(test)]
     pub fn load_schema_json(&mut self, raw_schema: &str) -> Result<(), RuntimeError> {
         self.validated_schema = None;
         self.runtime_error = None;
@@ -85,10 +86,12 @@ impl UiRuntime {
         self.load_schema(parsed)
     }
 
+    #[cfg(test)]
     pub fn has_schema(&self) -> bool {
         self.validated_schema.is_some()
     }
 
+    #[cfg(test)]
     pub fn runtime_error(&self) -> Option<&RuntimeError> {
         self.runtime_error.as_ref()
     }
@@ -114,7 +117,7 @@ impl UiRuntime {
 
     pub fn render_canvas(&mut self, ui: &mut egui::Ui, theme: &Theme) {
         if let Some(error) = &self.runtime_error {
-            let frame = theme.panel_frame(theme.surface_2, theme.spacing_16 as i8);
+            let frame = theme.card_frame();
             frame.show(ui, |ui| {
                 ui.label(
                     RichText::new("Canvas validation failed")

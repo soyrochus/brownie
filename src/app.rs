@@ -125,6 +125,28 @@ impl BrownieApp {
         }
     }
 
+    fn primary_button(&self, label: &str) -> egui::Button<'static> {
+        egui::Button::new(
+            RichText::new(label.to_string())
+                .size(13.0)
+                .color(self.theme.text_on_accent),
+        )
+        .fill(self.theme.accent_primary)
+        .stroke(self.theme.primary_button_stroke())
+        .corner_radius(egui::CornerRadius::same(self.theme.radius_8))
+    }
+
+    fn secondary_button(&self, label: &str) -> egui::Button<'static> {
+        egui::Button::new(
+            RichText::new(label.to_string())
+                .size(13.0)
+                .color(self.theme.text_primary),
+        )
+        .fill(self.theme.surface_2)
+        .stroke(self.theme.subtle_button_stroke())
+        .corner_radius(egui::CornerRadius::same(self.theme.radius_8))
+    }
+
     fn refresh_sessions(&mut self) {
         let (sessions, warnings) = store::load_all();
         self.sessions = sessions;
@@ -395,14 +417,7 @@ impl BrownieApp {
                     );
 
                     columns[2].with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                        ui.add_enabled(
-                            false,
-                            egui::Button::new(
-                                RichText::new("Active Mode")
-                                    .size(12.0)
-                                    .color(self.theme.text_muted),
-                            ),
-                        );
+                        ui.add_enabled(false, self.secondary_button("Active Mode"));
                         ui.label(
                             RichText::new("Passive Mode")
                                 .size(12.0)
@@ -421,91 +436,106 @@ impl BrownieApp {
                     .panel_frame(self.theme.surface_1, self.theme.spacing_16 as i8),
             )
             .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(Theme::P8, Theme::P8);
                 ui.label(
                     RichText::new("Workspace")
-                        .size(14.0)
+                        .strong()
+                        .size(16.0)
                         .color(self.theme.text_primary),
                 );
-                ui.add_space(self.theme.spacing_8);
-                ui.label(
-                    RichText::new(self.workspace.display().to_string())
-                        .size(12.0)
-                        .color(self.theme.text_muted),
-                );
-                ui.add_space(self.theme.spacing_16);
 
-                ui.label(
-                    RichText::new("Copilot Instructions")
-                        .size(13.0)
-                        .color(self.theme.text_primary),
-                );
-                ui.add_space(self.theme.spacing_8);
-                if self.instruction_files.is_empty() {
+                self.theme.card_frame().show(ui, |ui| {
                     ui.label(
-                        RichText::new("No instruction files detected")
+                        RichText::new(self.workspace.display().to_string())
                             .size(12.0)
                             .color(self.theme.text_muted),
                     );
-                } else {
-                    for path in &self.instruction_files {
-                        ui.label(RichText::new(path).size(12.0).color(self.theme.text_muted));
-                    }
-                }
+                });
 
-                ui.add_space(self.theme.spacing_32);
+                self.theme.card_frame().show(ui, |ui| {
+                    ui.label(
+                        RichText::new("Copilot Instructions")
+                            .strong()
+                            .size(14.0)
+                            .color(self.theme.text_primary),
+                    );
+                    ui.add_space(Theme::P8);
+                    if self.instruction_files.is_empty() {
+                        ui.label(
+                            RichText::new("No instruction files detected")
+                                .size(12.0)
+                                .color(self.theme.text_muted),
+                        );
+                    } else {
+                        for path in &self.instruction_files {
+                            ui.label(RichText::new(path).size(12.0).color(self.theme.text_muted));
+                        }
+                    }
+                });
+
+                ui.add_space(Theme::P8);
                 ui.label(
                     RichText::new("Recent Sessions")
-                        .size(13.0)
+                        .strong()
+                        .size(14.0)
                         .color(self.theme.text_primary),
                 );
-                ui.add_space(self.theme.spacing_8);
                 let mut clicked_session: Option<String> = None;
                 let active_session_id = self
                     .current_session
                     .as_ref()
                     .map(|session| &session.session_id);
-                for session in &self.sessions {
-                    let label = session
-                        .title
-                        .clone()
-                        .unwrap_or_else(|| session.session_id.clone());
-                    let is_active = active_session_id
-                        .map(|current| current == &session.session_id)
-                        .unwrap_or(false);
+                self.theme.card_frame().show(ui, |ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(Theme::P8, Theme::P8);
+                    for session in &self.sessions {
+                        let label = session
+                            .title
+                            .clone()
+                            .unwrap_or_else(|| session.session_id.clone());
+                        let is_active = active_session_id
+                            .map(|current| current == &session.session_id)
+                            .unwrap_or(false);
 
-                    ui.horizontal(|ui| {
-                        if is_active {
-                            ui.label(RichText::new("▌").color(self.theme.accent_primary));
-                        } else {
-                            ui.label(RichText::new(" ").color(self.theme.surface_1));
-                        }
-
-                        let button = egui::Button::new(
-                            RichText::new(label)
-                                .size(12.0)
-                                .color(self.theme.text_primary),
-                        )
-                        .fill(if is_active {
+                        let base_fill = if is_active {
                             self.theme.surface_3
                         } else {
                             self.theme.surface_2
-                        })
-                        .stroke(Stroke::new(
-                            1.0,
-                            if is_active {
-                                self.theme.accent_primary
-                            } else {
-                                self.theme.border_subtle
-                            },
-                        ))
-                        .corner_radius(egui::CornerRadius::same(self.theme.radius_8))
-                        .min_size(egui::vec2(ui.available_width(), 28.0));
-                        if ui.add(button).clicked() {
+                        };
+                        let button = egui::Button::new(
+                            RichText::new(label)
+                                .size(13.0)
+                                .color(self.theme.text_primary),
+                        )
+                        .fill(base_fill)
+                        .stroke(Stroke::NONE)
+                        .corner_radius(egui::CornerRadius::same(self.theme.radius_10))
+                        .min_size(egui::vec2(ui.available_width(), 34.0));
+                        let response = ui.add(button);
+
+                        if !is_active && response.hovered() {
+                            ui.painter().rect_filled(
+                                response.rect,
+                                egui::CornerRadius::same(self.theme.radius_10),
+                                self.theme.hover_overlay,
+                            );
+                        }
+                        if is_active {
+                            let accent_rect = egui::Rect::from_min_max(
+                                response.rect.min + egui::vec2(4.0, 5.0),
+                                egui::pos2(response.rect.min.x + 7.0, response.rect.max.y - 5.0),
+                            );
+                            ui.painter().rect_filled(
+                                accent_rect,
+                                egui::CornerRadius::same(2),
+                                self.theme.accent_primary,
+                            );
+                        }
+
+                        if response.clicked() {
                             clicked_session = Some(session.session_id.clone());
                         }
-                    });
-                    ui.add_space(6.0);
-                }
+                    }
+                });
 
                 if let Some(session_id) = clicked_session {
                     self.open_session(&session_id);
@@ -521,59 +551,67 @@ impl BrownieApp {
                     .panel_frame(self.theme.surface_1, self.theme.spacing_24 as i8),
             )
             .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(Theme::P12, Theme::P12);
                 ui.label(
                     RichText::new("Canvas")
-                        .size(14.0)
+                        .strong()
+                        .size(16.0)
                         .color(self.theme.text_primary),
                 );
-                ui.add_space(self.theme.spacing_8);
-                ui.label(
-                    RichText::new(format!("Intent: {}", self.active_intent.summary()))
-                        .size(12.0)
-                        .color(self.theme.text_muted),
-                );
-                ui.add_space(self.theme.spacing_8);
-                if let Some(selection) = &self.selected_template {
+
+                self.theme.card_frame().show(ui, |ui| {
                     ui.label(
-                        RichText::new(format!(
-                            "Template: {} ({})",
-                            selection.title, selection.template_id
-                        ))
-                        .size(12.0)
-                        .color(self.theme.text_primary),
+                        RichText::new("Selection Context")
+                            .strong()
+                            .size(14.0)
+                            .color(self.theme.text_primary),
                     );
+                    ui.add_space(Theme::P8);
                     ui.label(
-                        RichText::new(format!(
-                            "Source: {} [{}]",
-                            selection.provider_id, selection.provider_kind
-                        ))
-                        .size(12.0)
-                        .color(self.theme.text_muted),
+                        RichText::new(format!("Intent: {}", self.active_intent.summary()))
+                            .size(12.0)
+                            .color(self.theme.text_muted),
                     );
-                }
-                ui.add_space(self.theme.spacing_12);
-                if self.no_matching_template {
-                    let frame = self
-                        .theme
-                        .panel_frame(self.theme.surface_2, self.theme.spacing_12 as i8);
-                    frame.show(ui, |ui| {
+                    if let Some(selection) = &self.selected_template {
+                        ui.label(
+                            RichText::new(format!(
+                                "Template: {} ({})",
+                                selection.title, selection.template_id
+                            ))
+                            .size(13.0)
+                            .color(self.theme.text_primary),
+                        );
+                        ui.label(
+                            RichText::new(format!(
+                                "Source: {} [{}]",
+                                selection.provider_id, selection.provider_kind
+                            ))
+                            .size(12.0)
+                            .color(self.theme.text_muted),
+                        );
+                    }
+                });
+
+                self.theme.card_frame().show(ui, |ui| {
+                    ui.label(
+                        RichText::new("Template Canvas")
+                            .strong()
+                            .size(14.0)
+                            .color(self.theme.text_primary),
+                    );
+                    ui.add_space(Theme::P8);
+                    if self.no_matching_template {
                         ui.label(
                             RichText::new("No matching UI template found")
                                 .size(13.0)
                                 .color(self.theme.danger),
                         );
-                    });
-                } else {
-                    self.ui_runtime.render_canvas(ui, &self.theme);
-                }
-                ui.add_space(self.theme.spacing_12);
-                ui.separator();
-                ui.add_space(self.theme.spacing_12);
+                    } else {
+                        self.ui_runtime.render_canvas(ui, &self.theme);
+                    }
+                });
 
-                let debug_frame = self
-                    .theme
-                    .panel_frame(self.theme.surface_2, self.theme.spacing_12 as i8);
-                debug_frame.show(ui, |ui| {
+                self.theme.card_frame().show(ui, |ui| {
                     self.ui_runtime.render_event_log(ui, &self.theme);
                 });
             });
@@ -586,14 +624,15 @@ impl BrownieApp {
                     .panel_frame(self.theme.surface_1, self.theme.spacing_16 as i8),
             )
             .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(Theme::P12, Theme::P12);
                 ui.label(
                     RichText::new("Chat")
-                        .size(13.0)
+                        .strong()
+                        .size(16.0)
                         .color(self.theme.text_primary),
                 );
-                ui.add_space(self.theme.spacing_12);
 
-                let transcript_height = (ui.available_height() - 210.0).max(120.0);
+                let transcript_height = (ui.available_height() - 260.0).max(140.0);
                 ScrollArea::vertical()
                     .id_salt("chat_transcript")
                     .max_height(transcript_height)
@@ -607,7 +646,7 @@ impl BrownieApp {
                             );
                         }
 
-                        ui.spacing_mut().item_spacing.y = self.theme.spacing_16;
+                        ui.spacing_mut().item_spacing.y = Theme::P12;
                         for message in &self.transcript {
                             let is_user = message.role == "user";
                             let bubble = Frame::new()
@@ -617,7 +656,7 @@ impl BrownieApp {
                                     self.theme.surface_3
                                 })
                                 .corner_radius(egui::CornerRadius::same(self.theme.radius_12))
-                                .stroke(Stroke::new(1.0, self.theme.border_subtle))
+                                .stroke(Stroke::NONE)
                                 .inner_margin(egui::Margin::same(self.theme.spacing_12 as i8));
 
                             if is_user {
@@ -646,7 +685,7 @@ impl BrownieApp {
                             Frame::new()
                                 .fill(self.theme.surface_3)
                                 .corner_radius(egui::CornerRadius::same(self.theme.radius_12))
-                                .stroke(Stroke::new(1.0, self.theme.border_subtle))
+                                .stroke(Stroke::NONE)
                                 .inner_margin(egui::Margin::same(self.theme.spacing_12 as i8))
                                 .show(ui, |ui| {
                                     ui.label(
@@ -666,28 +705,31 @@ impl BrownieApp {
                     });
                 self.scroll_to_bottom = false;
 
-                ui.add_space(self.theme.spacing_12);
-                egui::CollapsingHeader::new(
-                    RichText::new("Diagnostics")
-                        .size(13.0)
-                        .color(self.theme.text_primary),
-                )
-                .default_open(false)
-                .show(ui, |ui| {
-                    ScrollArea::vertical()
-                        .id_salt("diagnostics_log")
-                        .max_height(90.0)
-                        .stick_to_bottom(true)
-                        .show(ui, |ui| {
-                            for entry in &self.diagnostics_log {
-                                ui.label(
-                                    RichText::new(entry).size(12.0).color(self.theme.text_muted),
-                                );
-                            }
-                        });
+                self.theme.card_frame().show(ui, |ui| {
+                    egui::CollapsingHeader::new(
+                        RichText::new("Diagnostics")
+                            .size(14.0)
+                            .strong()
+                            .color(self.theme.text_primary),
+                    )
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ScrollArea::vertical()
+                            .id_salt("diagnostics_log")
+                            .max_height(100.0)
+                            .stick_to_bottom(true)
+                            .show(ui, |ui| {
+                                for entry in &self.diagnostics_log {
+                                    ui.label(
+                                        RichText::new(entry)
+                                            .size(12.0)
+                                            .color(self.theme.text_muted),
+                                    );
+                                }
+                            });
+                    });
                 });
 
-                ui.add_space(self.theme.spacing_12);
                 let connected = self.connection_state == ConnectionState::Connected;
                 let input_enabled = connected && !self.is_streaming;
                 let hint = if !connected {
@@ -699,65 +741,58 @@ impl BrownieApp {
                 };
 
                 let mut send_now = false;
-                let input_frame = Frame::new()
-                    .fill(self.theme.surface_2)
-                    .stroke(Stroke::new(1.0, self.theme.border_subtle))
-                    .corner_radius(egui::CornerRadius::same(self.theme.radius_12))
-                    .inner_margin(egui::Margin::symmetric(
-                        self.theme.spacing_12 as i8,
-                        self.theme.spacing_12 as i8,
-                    ));
-
-                input_frame.show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        let button_width = 96.0;
-                        let row_spacing = self.theme.spacing_12;
-                        let text_width =
-                            (ui.available_width() - button_width - row_spacing).max(140.0);
-
-                        let response = ui
-                            .add_enabled_ui(input_enabled, |ui| {
-                                ui.add_sized(
-                                    [text_width, 0.0],
-                                    egui::TextEdit::singleline(&mut self.input_buffer)
-                                        .hint_text(hint),
-                                )
-                            })
-                            .inner;
-                        if response.has_focus() {
-                            let glow_rect = response.rect.expand(2.0);
-                            ui.painter().rect_stroke(
-                                glow_rect,
-                                egui::CornerRadius::same(self.theme.radius_10),
-                                Stroke::new(1.0, self.theme.input_focus_glow),
-                                egui::StrokeKind::Outside,
-                            );
-                        }
-                        if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                            send_now = true;
-                        }
-
-                        let send_button = egui::Button::new(
-                            RichText::new("Send")
-                                .size(13.0)
-                                .color(self.theme.text_primary),
-                        )
-                        .fill(self.theme.accent_primary)
-                        .stroke(Stroke::NONE)
-                        .corner_radius(egui::CornerRadius::same(self.theme.radius_8));
-                        let clicked = ui
-                            .add_enabled_ui(
-                                input_enabled && !self.input_buffer.trim().is_empty(),
-                                |ui| {
-                                    ui.add_sized(
-                                        [button_width, self.theme.button_height],
-                                        send_button,
-                                    )
-                                },
+                self.theme.composer_frame().show(ui, |ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(Theme::P8, Theme::P8);
+                    let response = ui
+                        .add_enabled_ui(input_enabled, |ui| {
+                            ui.add(
+                                egui::TextEdit::multiline(&mut self.input_buffer)
+                                    .hint_text(hint)
+                                    .desired_rows(4)
+                                    .desired_width(f32::INFINITY)
+                                    .lock_focus(true),
                             )
-                            .inner
-                            .clicked();
-                        send_now |= clicked;
+                        })
+                        .inner;
+
+                    if response.has_focus() {
+                        let glow_rect = response.rect.expand(2.0);
+                        ui.painter().rect_stroke(
+                            glow_rect,
+                            egui::CornerRadius::same(self.theme.radius_10),
+                            Stroke::new(1.0, self.theme.input_focus_glow),
+                            egui::StrokeKind::Outside,
+                        );
+                        ui.input(|input| {
+                            if input.key_pressed(egui::Key::Enter)
+                                && (input.modifiers.ctrl || input.modifiers.command)
+                            {
+                                send_now = true;
+                            }
+                        });
+                    }
+
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("Ctrl+Enter to send")
+                                .size(12.0)
+                                .color(self.theme.text_muted),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                            let clicked = ui
+                                .add_enabled_ui(
+                                    input_enabled && !self.input_buffer.trim().is_empty(),
+                                    |ui| {
+                                        ui.add_sized(
+                                            [96.0, self.theme.button_height],
+                                            self.primary_button("Send"),
+                                        )
+                                    },
+                                )
+                                .inner
+                                .clicked();
+                            send_now |= clicked;
+                        });
                     });
                 });
 
