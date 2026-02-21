@@ -10,3 +10,6 @@ wheels/
 .venv
 
 .brownie/
+
+# Rust build artifacts
+target/
