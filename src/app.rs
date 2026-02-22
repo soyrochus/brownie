@@ -4,11 +4,11 @@ use crate::session::store;
 use crate::session::{Message, SessionMeta, SCHEMA_VERSION};
 use crate::theme::Theme;
 use crate::ui::catalog::{CatalogManager, TemplateDocument, UiIntent};
+use crate::ui::intent::intent_from_text;
 use crate::ui::runtime::UiRuntime;
 use copilot_sdk::ConnectionState;
 use eframe::egui::{self, Align, Frame, RichText, ScrollArea, Stroke};
 use serde_json::Value;
-use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -190,85 +190,7 @@ impl BrownieApp {
     }
 
     fn intent_from_prompt(prompt: &str) -> Option<UiIntent> {
-        let lowered = prompt.to_ascii_lowercase();
-        let primary = if lowered.contains("list files")
-            || lowered.contains("listing of files")
-            || lowered.contains("file tree")
-            || lowered.contains("directory tree")
-            || lowered.contains("show files")
-            || lowered.contains("show me files")
-            || lowered.contains("all the files")
-            || lowered.contains("all files")
-            || lowered.contains("workspace files")
-            || (lowered.contains("files") && lowered.contains("canvas"))
-            || (lowered.contains("files") && lowered.contains("workspace"))
-        {
-            "file_listing".to_string()
-        } else if lowered.contains("plan")
-            || lowered.contains("roadmap")
-            || lowered.contains("milestone")
-        {
-            "plan_review".to_string()
-        } else if lowered.contains("ui") && lowered.contains("design") {
-            "ui_design_review".to_string()
-        } else if lowered.contains("review")
-            || lowered.contains("approve")
-            || lowered.contains("reject")
-            || lowered.contains("decline")
-            || lowered.contains("spec")
-            || lowered.contains("diff")
-            || lowered.contains("patch")
-            || lowered.contains("security")
-        {
-            "code_review".to_string()
-        } else {
-            return None;
-        };
-
-        let mut operations = BTreeSet::new();
-        if lowered.contains("approve") {
-            operations.insert("approve".to_string());
-        }
-        if lowered.contains("reject") || lowered.contains("decline") {
-            operations.insert("reject".to_string());
-        }
-        if lowered.contains("revise") || lowered.contains("change") {
-            operations.insert("revise".to_string());
-        }
-        if operations.is_empty() {
-            if primary == "file_listing" {
-                operations.insert("list".to_string());
-            } else if primary == "code_review" {
-                operations.insert("review".to_string());
-            }
-        }
-
-        let mut tags = BTreeSet::new();
-        if lowered.contains("spec") {
-            tags.insert("spec".to_string());
-        }
-        if lowered.contains("diff") || lowered.contains("patch") {
-            tags.insert("diff".to_string());
-        }
-        if lowered.contains("security") {
-            tags.insert("security".to_string());
-        }
-        if lowered.contains("plan") || lowered.contains("roadmap") {
-            tags.insert("plan".to_string());
-        }
-        if primary == "file_listing" {
-            tags.insert("files".to_string());
-            tags.insert("workspace".to_string());
-            if lowered.contains("tree") {
-                tags.insert("tree".to_string());
-            }
-        }
-
-        Some(UiIntent::new(
-            primary,
-            operations.into_iter().collect(),
-            tags.into_iter().collect(),
-        ))
+        intent_from_text(prompt)
     }
 
     fn clear_canvas_intent(&mut self) {
@@ -503,6 +425,21 @@ impl BrownieApp {
             }
             AppEvent::ToolCallSuppressed(tool_name) => {
                 self.log_diagnostic(format!("tool call suppressed (passive mode): {tool_name}"));
+            }
+            AppEvent::ToolExecutionOutcome {
+                tool_name,
+                status,
+                message,
+            } => {
+                let mut diagnostic = format!("tool outcome tool={} status={}", tool_name, status);
+                if tool_name == "query_ui_catalog" && (status == "text_only" || status == "error") {
+                    diagnostic.push_str(" canvas_not_rendered=true");
+                }
+                if let Some(message) = message {
+                    let compact = message.replace('\n', " ");
+                    diagnostic.push_str(&format!(" message={compact}"));
+                }
+                self.log_diagnostic(diagnostic);
             }
             AppEvent::CanvasToolRender {
                 intent,

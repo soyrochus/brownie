@@ -1,11 +1,12 @@
 use crate::event::AppEvent;
 use crate::ui::catalog::{CatalogManager, TemplateDocument, TemplateMatch, TemplateMeta, UiIntent};
+use crate::ui::intent::intent_from_text;
 use copilot_sdk::{
     Client, ConnectionState, Session, SessionConfig, SessionEventData, SystemMessageConfig,
     SystemMessageMode, Tool, ToolHandler, ToolResultObject,
 };
-use serde_json::json;
-use std::collections::BTreeSet;
+use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
@@ -41,6 +42,8 @@ Current Canvas capabilities:
 Behavior requirements:
 - Do not claim there is no canvas or that the UI is terminal-only.
 - Use the `query_ui_catalog` tool for requests about showing UI in canvas.
+- Never claim that something is rendered unless `query_ui_catalog` in the same turn returns `status=rendered_catalog` or `status=rendered_provisional`.
+- If `query_ui_catalog` returns `status=text_only` or any error, explicitly say canvas was not rendered and provide a text fallback.
 - If `query_ui_catalog` reports `rendered_catalog` or `rendered_provisional`, confirm what was rendered.
 - If `query_ui_catalog` reports `needs_save_confirmation=true`, ask the user whether to save the provisional template to catalog.
 - If a requested UI is not supported by current templates, say it is not currently available instead of inventing capabilities."
@@ -68,21 +71,18 @@ Behavior requirements:
 
     fn query_ui_catalog_handler(workspace: PathBuf, tx: mpsc::Sender<AppEvent>) -> ToolHandler {
         Arc::new(move |_name, args| {
-            let query = args
-                .get("query")
-                .and_then(|value| value.as_str())
-                .map(str::trim)
-                .unwrap_or("");
-            if query.is_empty() {
-                return ToolResultObject::error("query_ui_catalog requires a non-empty `query`");
-            }
+            let Some(query) = extract_tool_query(args) else {
+                return ToolResultObject::error(
+                    "query_ui_catalog requires a non-empty query string (supported keys: query, prompt, request, text, message)",
+                );
+            };
 
             let allow_provisional = args
                 .get("allow_provisional")
                 .and_then(|value| value.as_bool())
                 .unwrap_or(true);
 
-            let Some(intent) = intent_from_query(query) else {
+            let Some(intent) = intent_from_text(query.as_str()) else {
                 return ToolResultObject::text(
                     json!({
                         "status": "text_only",
@@ -133,7 +133,7 @@ Behavior requirements:
                 );
             }
 
-            let provisional = build_provisional_template(query, &intent);
+            let provisional = build_provisional_template(query.as_str(), &intent);
             let event = AppEvent::CanvasToolRender {
                 intent: intent.clone(),
                 template_id: provisional.meta.id.clone(),
@@ -318,6 +318,7 @@ Behavior requirements:
     ) {
         runtime_handle.spawn(async move {
             let mut events = session.subscribe();
+            let mut active_tool_calls: HashMap<String, String> = HashMap::new();
             loop {
                 match events.recv().await {
                     Ok(event) => match event.data {
@@ -335,14 +336,33 @@ Behavior requirements:
                             let _ = tx.send(AppEvent::SdkError(err.message));
                         }
                         SessionEventData::ToolUserRequested(data) => {
-                            if data.tool_name != "query_ui_catalog" {
-                                let _ = tx.send(AppEvent::ToolCallSuppressed(data.tool_name));
+                            let tool_name = data.tool_name;
+                            active_tool_calls.insert(data.tool_call_id, tool_name.clone());
+                            if tool_name != "query_ui_catalog" {
+                                let _ = tx.send(AppEvent::ToolCallSuppressed(tool_name));
                             }
                         }
                         SessionEventData::ToolExecutionStart(data) => {
-                            if data.tool_name != "query_ui_catalog" {
-                                let _ = tx.send(AppEvent::ToolCallSuppressed(data.tool_name));
+                            let tool_name = data.tool_name;
+                            active_tool_calls.insert(data.tool_call_id, tool_name.clone());
+                            if tool_name != "query_ui_catalog" {
+                                let _ = tx.send(AppEvent::ToolCallSuppressed(tool_name));
                             }
+                        }
+                        SessionEventData::ToolExecutionComplete(data) => {
+                            let tool_name = active_tool_calls
+                                .remove(&data.tool_call_id)
+                                .unwrap_or_else(|| "unknown".to_string());
+                            let (status, message) = summarize_tool_execution(
+                                data.success,
+                                data.result.as_ref().map(|result| result.content.as_str()),
+                                data.error.as_ref().map(|err| err.message.as_str()),
+                            );
+                            let _ = tx.send(AppEvent::ToolExecutionOutcome {
+                                tool_name,
+                                status,
+                                message,
+                            });
                         }
                         _ => {}
                     },
@@ -359,82 +379,51 @@ Behavior requirements:
     }
 }
 
-fn intent_from_query(query: &str) -> Option<UiIntent> {
-    let lowered = query.to_ascii_lowercase();
-    let primary = if lowered.contains("list files")
-        || lowered.contains("listing of files")
-        || lowered.contains("file tree")
-        || lowered.contains("directory tree")
-        || lowered.contains("show files")
-        || lowered.contains("show me files")
-        || (lowered.contains("files") && lowered.contains("canvas"))
-    {
-        "file_listing".to_string()
-    } else if lowered.contains("plan")
-        || lowered.contains("roadmap")
-        || lowered.contains("milestone")
-    {
-        "plan_review".to_string()
-    } else if lowered.contains("ui") && lowered.contains("design") {
-        "ui_design_review".to_string()
-    } else if lowered.contains("review")
-        || lowered.contains("approve")
-        || lowered.contains("reject")
-        || lowered.contains("decline")
-        || lowered.contains("spec")
-        || lowered.contains("diff")
-        || lowered.contains("patch")
-        || lowered.contains("security")
-    {
-        "code_review".to_string()
-    } else {
-        return None;
-    };
-
-    let mut operations = BTreeSet::new();
-    if lowered.contains("approve") {
-        operations.insert("approve".to_string());
-    }
-    if lowered.contains("reject") || lowered.contains("decline") {
-        operations.insert("reject".to_string());
-    }
-    if lowered.contains("revise") || lowered.contains("change") {
-        operations.insert("revise".to_string());
-    }
-    if operations.is_empty() {
-        if primary == "file_listing" {
-            operations.insert("list".to_string());
-        } else if primary == "code_review" {
-            operations.insert("review".to_string());
+fn extract_tool_query(args: &Value) -> Option<String> {
+    for key in ["query", "prompt", "request", "text", "message"] {
+        if let Some(query) = args.get(key).and_then(Value::as_str) {
+            let query = query.trim();
+            if !query.is_empty() {
+                return Some(query.to_string());
+            }
         }
     }
 
-    let mut tags = BTreeSet::new();
-    if lowered.contains("spec") {
-        tags.insert("spec".to_string());
-    }
-    if lowered.contains("diff") || lowered.contains("patch") {
-        tags.insert("diff".to_string());
-    }
-    if lowered.contains("security") {
-        tags.insert("security".to_string());
-    }
-    if lowered.contains("plan") || lowered.contains("roadmap") {
-        tags.insert("plan".to_string());
-    }
-    if primary == "file_listing" {
-        tags.insert("files".to_string());
-        tags.insert("workspace".to_string());
-        if lowered.contains("tree") {
-            tags.insert("tree".to_string());
+    if let Some(query) = args.as_str() {
+        let query = query.trim();
+        if !query.is_empty() {
+            return Some(query.to_string());
         }
     }
 
-    Some(UiIntent::new(
-        primary,
-        operations.into_iter().collect(),
-        tags.into_iter().collect(),
-    ))
+    None
+}
+
+fn summarize_tool_execution(
+    success: bool,
+    result_content: Option<&str>,
+    error_message: Option<&str>,
+) -> (String, Option<String>) {
+    if !success {
+        return (
+            "error".to_string(),
+            error_message.map(|message| message.to_string()),
+        );
+    }
+
+    if let Some(content) = result_content {
+        if let Ok(payload) = serde_json::from_str::<Value>(content) {
+            if let Some(status) = payload.get("status").and_then(Value::as_str) {
+                let message = payload
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .map(|message| message.to_string());
+                return (status.to_string(), message);
+            }
+        }
+    }
+
+    ("success".to_string(), None)
 }
 
 fn provisional_template_id(intent: &UiIntent) -> String {
@@ -447,6 +436,29 @@ fn provisional_template_id(intent: &UiIntent) -> String {
         sanitize_identifier(&intent.primary),
         now
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::summarize_tool_execution;
+
+    #[test]
+    fn summarize_tool_execution_reads_status_from_json_payload() {
+        let (status, message) = summarize_tool_execution(
+            true,
+            Some("{\"status\":\"text_only\",\"message\":\"No UI intent detected\"}"),
+            None,
+        );
+        assert_eq!(status, "text_only");
+        assert_eq!(message.as_deref(), Some("No UI intent detected"));
+    }
+
+    #[test]
+    fn summarize_tool_execution_reports_error_when_execution_fails() {
+        let (status, message) = summarize_tool_execution(false, None, Some("tool call failed"));
+        assert_eq!(status, "error");
+        assert_eq!(message.as_deref(), Some("tool call failed"));
+    }
 }
 
 fn sanitize_identifier(raw: &str) -> String {

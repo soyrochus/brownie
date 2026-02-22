@@ -11,6 +11,11 @@ pub enum AppEvent {
     SdkError(String),
     SessionCreated(String),
     ToolCallSuppressed(String),
+    ToolExecutionOutcome {
+        tool_name: String,
+        status: String,
+        message: Option<String>,
+    },
     CanvasToolRender {
         intent: UiIntent,
         template_id: String,
