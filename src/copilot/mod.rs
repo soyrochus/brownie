@@ -43,6 +43,7 @@ Current Canvas capabilities:
 Behavior requirements:
 - Do not claim there is no canvas or that the UI is terminal-only.
 - Use the `query_ui_catalog` tool for requests about showing UI in canvas.
+- For requests to show/list/browse workspace files in canvas, call `query_ui_catalog` before answering and pass the user's request text in `query`.
 - For file browsing requests, pass `root_path` when you want a specific directory root.
 - Prefer updating/focusing existing canvas blocks when the same template is already present, instead of repeatedly creating replacement views.
 - Never claim that something is rendered unless `query_ui_catalog` in the same turn returns `status=rendered_catalog` or `status=rendered_provisional`.
@@ -60,7 +61,19 @@ Behavior requirements:
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "User request to evaluate against the UI catalog"
+                        "description": "Natural-language request to evaluate against the UI catalog"
+                    },
+                    "intent": {
+                        "type": "string",
+                        "description": "Optional intent hint (for example: file_listing, code_review, plan_review)"
+                    },
+                    "template_id": {
+                        "type": "string",
+                        "description": "Optional template hint (for example: builtin.file_listing.default)"
+                    },
+                    "template": {
+                        "type": "string",
+                        "description": "Optional shorthand template hint"
                     },
                     "root_path": {
                         "type": "string",
@@ -81,11 +94,7 @@ Behavior requirements:
 
     fn query_ui_catalog_handler(workspace: PathBuf, tx: mpsc::Sender<AppEvent>) -> ToolHandler {
         Arc::new(move |_name, args| {
-            let Some(query) = extract_tool_query(args) else {
-                return ToolResultObject::error(
-                    "query_ui_catalog requires a non-empty query string (supported keys: query, prompt, request, text, message, input)",
-                );
-            };
+            let query = extract_tool_query(args).unwrap_or_else(fallback_canvas_query);
 
             let allow_provisional = args
                 .get("allow_provisional")
@@ -436,6 +445,10 @@ fn extract_tool_query(args: &Value) -> Option<String> {
         return Some(query);
     }
 
+    if let Some(inferred) = infer_query_from_tool_args(args) {
+        return Some(inferred);
+    }
+
     args.as_str().and_then(|query| {
         let query = query.trim();
         if query.is_empty() {
@@ -444,6 +457,72 @@ fn extract_tool_query(args: &Value) -> Option<String> {
             Some(query.to_string())
         }
     })
+}
+
+fn fallback_canvas_query() -> String {
+    "Show me the files in the workspace in the canvas".to_string()
+}
+
+fn infer_query_from_tool_args(args: &Value) -> Option<String> {
+    if let Some(hint) =
+        extract_string_argument(args, &["intent", "template_id", "template", "primary"])
+    {
+        if let Some(query) = query_from_template_hint(&hint) {
+            return Some(query.to_string());
+        }
+    }
+
+    if let Some(intent_obj) = args.get("intent") {
+        if let Some(primary) = intent_obj.get("primary").and_then(Value::as_str) {
+            if let Some(query) = query_from_template_hint(primary) {
+                return Some(query.to_string());
+            }
+        }
+        if let Some(template_id) = intent_obj.get("template_id").and_then(Value::as_str) {
+            if let Some(query) = query_from_template_hint(template_id) {
+                return Some(query.to_string());
+            }
+        }
+    }
+
+    if args.get("root_path").is_some()
+        || args.get("root").is_some()
+        || args.get("path").is_some()
+        || args.get("directory").is_some()
+        || args.get("cwd").is_some()
+        || args.get("workspace").is_some()
+        || args.get("workspace_path").is_some()
+    {
+        return Some("Show me the files in the workspace in the canvas".to_string());
+    }
+
+    None
+}
+
+fn query_from_template_hint(hint: &str) -> Option<&'static str> {
+    let normalized = hint.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    if normalized.contains("file_listing")
+        || normalized.contains("file-listing")
+        || normalized.contains("file listing")
+        || normalized.contains("file_explorer")
+        || normalized.contains("file explorer")
+    {
+        return Some("Show me the files in the workspace in the canvas");
+    }
+
+    if normalized.contains("code_review") || normalized.contains("code review") {
+        return Some("Review this code change in the canvas");
+    }
+
+    if normalized.contains("plan_review") || normalized.contains("plan review") {
+        return Some("Review this plan in the canvas");
+    }
+
+    None
 }
 
 fn summarize_tool_execution(
@@ -492,7 +571,7 @@ fn provisional_template_id(intent: &UiIntent) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_tool_query, summarize_tool_execution};
+    use super::{extract_tool_query, fallback_canvas_query, summarize_tool_execution};
     use serde_json::json;
 
     #[test]
@@ -530,6 +609,61 @@ mod tests {
         });
         let query = extract_tool_query(&args);
         assert_eq!(query.as_deref(), Some("show files in src"));
+    }
+
+    #[test]
+    fn extract_tool_query_infers_from_template_hint() {
+        let args = json!({
+            "template_id": "builtin.file_listing.default"
+        });
+        let query = extract_tool_query(&args);
+        assert_eq!(
+            query.as_deref(),
+            Some("Show me the files in the workspace in the canvas")
+        );
+    }
+
+    #[test]
+    fn extract_tool_query_infers_from_nested_intent_primary() {
+        let args = json!({
+            "intent": {
+                "primary": "plan_review"
+            }
+        });
+        let query = extract_tool_query(&args);
+        assert_eq!(query.as_deref(), Some("Review this plan in the canvas"));
+    }
+
+    #[test]
+    fn extract_tool_query_infers_from_root_path() {
+        let args = json!({
+            "root_path": "/home/iwk/src/brownie"
+        });
+        let query = extract_tool_query(&args);
+        assert_eq!(
+            query.as_deref(),
+            Some("Show me the files in the workspace in the canvas")
+        );
+    }
+
+    #[test]
+    fn extract_tool_query_infers_from_workspace_path_alias() {
+        let args = json!({
+            "workspace_path": "/home/iwk/src/brownie"
+        });
+        let query = extract_tool_query(&args);
+        assert_eq!(
+            query.as_deref(),
+            Some("Show me the files in the workspace in the canvas")
+        );
+    }
+
+    #[test]
+    fn fallback_canvas_query_defaults_to_workspace_file_listing() {
+        assert_eq!(
+            fallback_canvas_query(),
+            "Show me the files in the workspace in the canvas"
+        );
     }
 }
 
