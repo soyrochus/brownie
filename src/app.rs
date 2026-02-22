@@ -1213,56 +1213,66 @@ impl BrownieApp {
                     .current_session
                     .as_ref()
                     .map(|session| &session.session_id);
+                let sessions_height = (ui.available_height() - Theme::P8).max(120.0);
                 self.theme.card_frame().show(ui, |ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(Theme::P8, Theme::P8);
-                    for session in &self.sessions {
-                        let label = session
-                            .title
-                            .clone()
-                            .unwrap_or_else(|| session.session_id.clone());
-                        let is_active = active_session_id
-                            .map(|current| current == &session.session_id)
-                            .unwrap_or(false);
+                    ScrollArea::vertical()
+                        .id_salt("recent_sessions_scroll")
+                        .max_height(sessions_height)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            for session in &self.sessions {
+                                let label = session
+                                    .title
+                                    .clone()
+                                    .unwrap_or_else(|| session.session_id.clone());
+                                let is_active = active_session_id
+                                    .map(|current| current == &session.session_id)
+                                    .unwrap_or(false);
 
-                        let base_fill = if is_active {
-                            self.theme.surface_3
-                        } else {
-                            self.theme.surface_2
-                        };
-                        let button = egui::Button::new(
-                            RichText::new(label)
-                                .size(13.0)
-                                .color(self.theme.text_primary),
-                        )
-                        .fill(base_fill)
-                        .stroke(Stroke::NONE)
-                        .corner_radius(egui::CornerRadius::same(self.theme.radius_10))
-                        .min_size(egui::vec2(ui.available_width(), 34.0));
-                        let response = ui.add(button);
+                                let base_fill = if is_active {
+                                    self.theme.surface_3
+                                } else {
+                                    self.theme.surface_2
+                                };
+                                let button = egui::Button::new(
+                                    RichText::new(label)
+                                        .size(13.0)
+                                        .color(self.theme.text_primary),
+                                )
+                                .fill(base_fill)
+                                .stroke(Stroke::NONE)
+                                .corner_radius(egui::CornerRadius::same(self.theme.radius_10))
+                                .min_size(egui::vec2(ui.available_width(), 34.0));
+                                let response = ui.add(button);
 
-                        if !is_active && response.hovered() {
-                            ui.painter().rect_filled(
-                                response.rect,
-                                egui::CornerRadius::same(self.theme.radius_10),
-                                self.theme.hover_overlay,
-                            );
-                        }
-                        if is_active {
-                            let accent_rect = egui::Rect::from_min_max(
-                                response.rect.min + egui::vec2(4.0, 5.0),
-                                egui::pos2(response.rect.min.x + 7.0, response.rect.max.y - 5.0),
-                            );
-                            ui.painter().rect_filled(
-                                accent_rect,
-                                egui::CornerRadius::same(2),
-                                self.theme.accent_primary,
-                            );
-                        }
+                                if !is_active && response.hovered() {
+                                    ui.painter().rect_filled(
+                                        response.rect,
+                                        egui::CornerRadius::same(self.theme.radius_10),
+                                        self.theme.hover_overlay,
+                                    );
+                                }
+                                if is_active {
+                                    let accent_rect = egui::Rect::from_min_max(
+                                        response.rect.min + egui::vec2(4.0, 5.0),
+                                        egui::pos2(
+                                            response.rect.min.x + 7.0,
+                                            response.rect.max.y - 5.0,
+                                        ),
+                                    );
+                                    ui.painter().rect_filled(
+                                        accent_rect,
+                                        egui::CornerRadius::same(2),
+                                        self.theme.accent_primary,
+                                    );
+                                }
 
-                        if response.clicked() {
-                            clicked_session = Some(session.session_id.clone());
-                        }
-                    }
+                                if response.clicked() {
+                                    clicked_session = Some(session.session_id.clone());
+                                }
+                            }
+                        });
                 });
 
                 if let Some(session_id) = clicked_session {
@@ -1287,203 +1297,231 @@ impl BrownieApp {
                         .color(self.theme.text_primary),
                 );
 
-                self.theme.card_frame().show(ui, |ui| {
-                    ui.label(
-                        RichText::new("Selection Context")
-                            .strong()
-                            .size(14.0)
-                            .color(self.theme.text_primary),
-                    );
-                    ui.add_space(Theme::P8);
-                    ui.label(
-                        RichText::new(match &self.active_intent {
-                            Some(intent) => format!("Intent: {}", intent.summary()),
-                            None => "Intent: none".to_string(),
-                        })
-                        .size(12.0)
-                        .color(self.theme.text_muted),
-                    );
-                    if let Some(selection) = &self.selected_template {
-                        ui.label(
-                            RichText::new(format!(
-                                "Template: {} ({})",
-                                selection.title, selection.template_id
-                            ))
-                            .size(13.0)
-                            .color(self.theme.text_primary),
-                        );
-                        ui.label(
-                            RichText::new(format!(
-                                "Source: {} [{}]",
-                                selection.provider_id, selection.provider_kind
-                            ))
-                            .size(12.0)
-                            .color(self.theme.text_muted),
-                        );
-                    }
-                });
-
                 let mut focus_block: Option<String> = None;
                 let mut toggle_block: Option<String> = None;
                 let mut close_block: Option<String> = None;
                 let mut new_events: Vec<UiEvent> = Vec::new();
+                let mut save_provisional = false;
+                let mut dismiss_provisional = false;
 
-                self.theme.card_frame().show(ui, |ui| {
-                    ui.label(
-                        RichText::new("Workspace Blocks")
-                            .strong()
-                            .size(14.0)
-                            .color(self.theme.text_primary),
-                    );
-                    ui.add_space(Theme::P8);
-                    if self.canvas_blocks.is_empty() {
-                        if self.no_matching_template {
-                            ui.label(
-                                RichText::new("No matching UI template found")
-                                    .size(13.0)
-                                    .color(self.theme.danger),
-                            );
-                        } else {
-                            ui.label(
-                                RichText::new("No open Canvas blocks")
-                                    .size(13.0)
+                ScrollArea::vertical()
+                    .id_salt("canvas_panel_scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        self.theme.card_frame().show(ui, |ui| {
+                            egui::CollapsingHeader::new(
+                                RichText::new("Selection Context")
+                                    .strong()
+                                    .size(14.0)
+                                    .color(self.theme.text_primary),
+                            )
+                            .id_salt("selection_context")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                ui.add_space(Theme::P8);
+                                ui.label(
+                                    RichText::new(match &self.active_intent {
+                                        Some(intent) => format!("Intent: {}", intent.summary()),
+                                        None => "Intent: none".to_string(),
+                                    })
+                                    .size(12.0)
                                     .color(self.theme.text_muted),
-                            );
-                        }
-                    } else {
-                        for index in 0..self.canvas_blocks.len() {
-                            let block_id = self.canvas_blocks[index].state.block_id.clone();
-                            let block_title = self.canvas_blocks[index].state.title.clone();
-                            let provider_id = self.canvas_blocks[index].state.provider_id.clone();
-                            let provider_kind =
-                                self.canvas_blocks[index].state.provider_kind.clone();
-                            let is_minimized = self.canvas_blocks[index].state.minimized;
-                            let is_active =
-                                self.active_block_id.as_deref() == Some(block_id.as_str());
-                            let border_color = if is_active {
-                                self.theme.accent_primary
-                            } else {
-                                self.theme.border_subtle
-                            };
-                            Frame::new()
-                                .fill(self.theme.surface_2)
-                                .stroke(Stroke::new(1.0, border_color))
-                                .corner_radius(egui::CornerRadius::same(self.theme.radius_10))
-                                .inner_margin(egui::Margin::same(self.theme.spacing_12 as i8))
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.label(
-                                            RichText::new(format!(
-                                                "{} ({})",
-                                                block_title, block_id
-                                            ))
-                                            .size(13.0)
-                                            .color(self.theme.text_primary),
-                                        );
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(Align::Center),
-                                            |ui| {
-                                                if ui.add(egui::Button::new("Close")).clicked() {
-                                                    close_block = Some(block_id.clone());
-                                                }
-                                                if ui
-                                                    .add(egui::Button::new(if is_minimized {
-                                                        "Expand"
-                                                    } else {
-                                                        "Minimize"
-                                                    }))
-                                                    .clicked()
-                                                {
-                                                    toggle_block = Some(block_id.clone());
-                                                }
-                                                if !is_active
-                                                    && ui.add(egui::Button::new("Focus")).clicked()
-                                                {
-                                                    focus_block = Some(block_id.clone());
-                                                }
-                                            },
-                                        );
-                                    });
+                                );
+                                if let Some(selection) = &self.selected_template {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "Template: {} ({})",
+                                            selection.title, selection.template_id
+                                        ))
+                                        .size(13.0)
+                                        .color(self.theme.text_primary),
+                                    );
                                     ui.label(
                                         RichText::new(format!(
                                             "Source: {} [{}]",
-                                            provider_id, provider_kind
+                                            selection.provider_id, selection.provider_kind
                                         ))
                                         .size(12.0)
                                         .color(self.theme.text_muted),
                                     );
-                                    if is_minimized {
-                                        ui.label(
-                                            RichText::new("Block is minimized")
+                                }
+                            });
+                        });
+
+                        self.theme.card_frame().show(ui, |ui| {
+                            ui.label(
+                                RichText::new("Workspace Blocks")
+                                    .strong()
+                                    .size(14.0)
+                                    .color(self.theme.text_primary),
+                            );
+                            ui.add_space(Theme::P8);
+                            if self.canvas_blocks.is_empty() {
+                                if self.no_matching_template {
+                                    ui.label(
+                                        RichText::new("No matching UI template found")
+                                            .size(13.0)
+                                            .color(self.theme.danger),
+                                    );
+                                } else {
+                                    ui.label(
+                                        RichText::new("No open Canvas blocks")
+                                            .size(13.0)
+                                            .color(self.theme.text_muted),
+                                    );
+                                }
+                            } else {
+                                for index in 0..self.canvas_blocks.len() {
+                                    let block_id = self.canvas_blocks[index].state.block_id.clone();
+                                    let block_title = self.canvas_blocks[index].state.title.clone();
+                                    let provider_id =
+                                        self.canvas_blocks[index].state.provider_id.clone();
+                                    let provider_kind =
+                                        self.canvas_blocks[index].state.provider_kind.clone();
+                                    let is_minimized = self.canvas_blocks[index].state.minimized;
+                                    let is_active =
+                                        self.active_block_id.as_deref() == Some(block_id.as_str());
+                                    let border_color = if is_active {
+                                        self.theme.accent_primary
+                                    } else {
+                                        self.theme.border_subtle
+                                    };
+                                    Frame::new()
+                                        .fill(self.theme.surface_2)
+                                        .stroke(Stroke::new(1.0, border_color))
+                                        .corner_radius(egui::CornerRadius::same(
+                                            self.theme.radius_10,
+                                        ))
+                                        .inner_margin(egui::Margin::same(
+                                            self.theme.spacing_12 as i8,
+                                        ))
+                                        .show(ui, |ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "{} ({})",
+                                                        block_title, block_id
+                                                    ))
+                                                    .size(13.0)
+                                                    .color(self.theme.text_primary),
+                                                );
+                                                ui.with_layout(
+                                                    egui::Layout::right_to_left(Align::Center),
+                                                    |ui| {
+                                                        if ui
+                                                            .small_button("x")
+                                                            .on_hover_text("Close block")
+                                                            .clicked()
+                                                        {
+                                                            close_block = Some(block_id.clone());
+                                                        }
+                                                        if ui
+                                                            .small_button(if is_minimized {
+                                                                "+"
+                                                            } else {
+                                                                "-"
+                                                            })
+                                                            .on_hover_text(if is_minimized {
+                                                                "Expand block"
+                                                            } else {
+                                                                "Minimize block"
+                                                            })
+                                                            .clicked()
+                                                        {
+                                                            toggle_block = Some(block_id.clone());
+                                                        }
+                                                        if !is_active
+                                                            && ui
+                                                                .small_button("o")
+                                                                .on_hover_text("Focus block")
+                                                                .clicked()
+                                                        {
+                                                            focus_block = Some(block_id.clone());
+                                                        }
+                                                    },
+                                                );
+                                            });
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "Source: {} [{}]",
+                                                    provider_id, provider_kind
+                                                ))
                                                 .size(12.0)
                                                 .color(self.theme.text_muted),
-                                        );
-                                    } else {
-                                        ui.add_space(Theme::P8);
-                                        let block = &mut self.canvas_blocks[index];
-                                        block.ui_runtime.render_canvas(ui, &self.theme);
-                                        let events = block.ui_runtime.event_log();
-                                        if block.synced_event_count < events.len() {
-                                            new_events.extend_from_slice(
-                                                &events[block.synced_event_count..],
                                             );
-                                            block.synced_event_count = events.len();
-                                        }
-                                    }
-                                });
-                            ui.add_space(Theme::P8);
-                        }
-                    }
-                });
-
-                let mut save_provisional = false;
-                let mut dismiss_provisional = false;
-                if let Some(template) = &self.pending_provisional_template {
-                    self.theme.card_frame().show(ui, |ui| {
-                        ui.label(
-                            RichText::new("Provisional Template")
-                                .strong()
-                                .size(14.0)
-                                .color(self.theme.text_primary),
-                        );
-                        ui.add_space(Theme::P8);
-                        ui.label(
-                            RichText::new(format!(
-                                "Save '{}' to your user UI catalog?",
-                                template.meta.title
-                            ))
-                            .size(12.0)
-                            .color(self.theme.text_muted),
-                        );
-                        ui.add_space(Theme::P8);
-                        ui.horizontal(|ui| {
-                            if ui.add(self.primary_button("Save to Catalog")).clicked() {
-                                save_provisional = true;
-                            }
-                            if ui.add(self.secondary_button("Not Now")).clicked() {
-                                dismiss_provisional = true;
+                                            if is_minimized {
+                                                ui.label(
+                                                    RichText::new("Block is minimized")
+                                                        .size(12.0)
+                                                        .color(self.theme.text_muted),
+                                                );
+                                            } else {
+                                                ui.add_space(Theme::P8);
+                                                let block = &mut self.canvas_blocks[index];
+                                                block.ui_runtime.render_canvas(ui, &self.theme);
+                                                let events = block.ui_runtime.event_log();
+                                                if block.synced_event_count < events.len() {
+                                                    new_events.extend_from_slice(
+                                                        &events[block.synced_event_count..],
+                                                    );
+                                                    block.synced_event_count = events.len();
+                                                }
+                                            }
+                                        });
+                                    ui.add_space(Theme::P8);
+                                }
                             }
                         });
-                    });
-                }
 
-                self.theme.card_frame().show(ui, |ui| {
-                    ui.label(
-                        RichText::new("UI Event Log")
-                            .color(self.theme.text_primary)
-                            .size(13.0),
-                    );
-                    ui.add_space(Theme::P8);
-                    ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
-                        for event in self.canvas_event_log.entries() {
-                            ui.label(
-                                RichText::new(event.to_log_line())
-                                    .color(self.theme.text_muted)
-                                    .size(12.0),
-                            );
+                        if let Some(template) = &self.pending_provisional_template {
+                            self.theme.card_frame().show(ui, |ui| {
+                                ui.label(
+                                    RichText::new("Provisional Template")
+                                        .strong()
+                                        .size(14.0)
+                                        .color(self.theme.text_primary),
+                                );
+                                ui.add_space(Theme::P8);
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Save '{}' to your user UI catalog?",
+                                        template.meta.title
+                                    ))
+                                    .size(12.0)
+                                    .color(self.theme.text_muted),
+                                );
+                                ui.add_space(Theme::P8);
+                                ui.horizontal(|ui| {
+                                    if ui.add(self.primary_button("Save to Catalog")).clicked() {
+                                        save_provisional = true;
+                                    }
+                                    if ui.add(self.secondary_button("Not Now")).clicked() {
+                                        dismiss_provisional = true;
+                                    }
+                                });
+                            });
                         }
+
+                        self.theme.card_frame().show(ui, |ui| {
+                            egui::CollapsingHeader::new(
+                                RichText::new("UI Event Log")
+                                    .color(self.theme.text_primary)
+                                    .size(13.0),
+                            )
+                            .id_salt("ui_event_log")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                ui.add_space(Theme::P8);
+                                for event in self.canvas_event_log.entries() {
+                                    ui.label(
+                                        RichText::new(event.to_log_line())
+                                            .color(self.theme.text_muted)
+                                            .size(12.0),
+                                    );
+                                }
+                            });
+                        });
                     });
-                });
 
                 let had_new_events = !new_events.is_empty();
                 for event in new_events {
