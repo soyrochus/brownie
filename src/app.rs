@@ -4,8 +4,12 @@ use crate::session::store;
 use crate::session::{Message, SessionMeta, SCHEMA_VERSION};
 use crate::theme::Theme;
 use crate::ui::catalog::{CatalogManager, TemplateDocument, UiIntent};
-use crate::ui::intent::intent_from_text;
+use crate::ui::event::{UiEvent, UiEventLog};
 use crate::ui::runtime::UiRuntime;
+use crate::ui::workspace::{
+    CanvasBlockActionStatus, CanvasBlockActionType, CanvasBlockActor, CanvasBlockState,
+    CanvasWorkspaceState,
+};
 use copilot_sdk::ConnectionState;
 use eframe::egui::{self, Align, Frame, RichText, ScrollArea, Stroke};
 use serde_json::Value;
@@ -20,6 +24,123 @@ struct TemplateSelectionContext {
     title: String,
     provider_id: String,
     provider_kind: String,
+}
+
+struct CanvasBlock {
+    state: CanvasBlockState,
+    ui_runtime: UiRuntime,
+    synced_event_count: usize,
+    last_touched_at: u128,
+}
+
+struct CanvasRenderRequest {
+    intent: UiIntent,
+    template_id: String,
+    title: String,
+    provider_id: String,
+    provider_kind: String,
+    target_block_id: Option<String>,
+    root_path: Option<String>,
+    schema: Value,
+    provisional_template: Option<TemplateDocument>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BlockTargetResolution {
+    Existing(usize),
+    NotFound,
+    Ambiguous(Vec<String>),
+}
+
+fn resolve_block_target_for_template(
+    blocks: &[CanvasBlock],
+    active_block_id: Option<&str>,
+    template_id: &str,
+) -> BlockTargetResolution {
+    // Explicit active block id has priority when it matches the requested template.
+    if let Some(active_block_id) = active_block_id {
+        if let Some(index) = blocks.iter().position(|block| {
+            block.state.block_id == active_block_id && block.state.template_id == template_id
+        }) {
+            return BlockTargetResolution::Existing(index);
+        }
+    }
+
+    let mut matches = blocks
+        .iter()
+        .enumerate()
+        .filter(|(_, block)| block.state.template_id == template_id)
+        .collect::<Vec<_>>();
+
+    if matches.is_empty() {
+        return BlockTargetResolution::NotFound;
+    }
+
+    let newest_touch = matches
+        .iter()
+        .map(|(_, block)| block.last_touched_at)
+        .max()
+        .unwrap_or(0);
+    matches.retain(|(_, block)| block.last_touched_at == newest_touch);
+
+    if matches.len() == 1 {
+        return BlockTargetResolution::Existing(matches[0].0);
+    }
+
+    let mut block_ids = matches
+        .into_iter()
+        .map(|(_, block)| block.state.block_id.clone())
+        .collect::<Vec<_>>();
+    block_ids.sort();
+    BlockTargetResolution::Ambiguous(block_ids)
+}
+
+fn apply_focus_transition(
+    blocks: &mut [CanvasBlock],
+    active_block_id: &mut Option<String>,
+    block_id: &str,
+    touched_at: u128,
+) -> bool {
+    let Some(index) = blocks
+        .iter()
+        .position(|block| block.state.block_id == block_id)
+    else {
+        return false;
+    };
+    *active_block_id = Some(block_id.to_string());
+    blocks[index].last_touched_at = touched_at;
+    true
+}
+
+fn apply_toggle_minimize_transition(
+    blocks: &mut [CanvasBlock],
+    block_id: &str,
+    touched_at: u128,
+) -> Option<bool> {
+    let index = blocks
+        .iter()
+        .position(|block| block.state.block_id == block_id)?;
+    let block = &mut blocks[index];
+    block.state.minimized = !block.state.minimized;
+    block.last_touched_at = touched_at;
+    Some(block.state.minimized)
+}
+
+fn apply_close_transition(
+    blocks: &mut Vec<CanvasBlock>,
+    active_block_id: &mut Option<String>,
+    block_id: &str,
+) -> bool {
+    let before = blocks.len();
+    blocks.retain(|block| block.state.block_id != block_id);
+    if blocks.len() == before {
+        return false;
+    }
+
+    if active_block_id.as_deref() == Some(block_id) {
+        *active_block_id = blocks.last().map(|block| block.state.block_id.clone());
+    }
+    true
 }
 
 pub struct BrownieApp {
@@ -38,12 +159,17 @@ pub struct BrownieApp {
     scroll_to_bottom: bool,
     session_unavailable: bool,
     theme: Theme,
-    ui_runtime: UiRuntime,
     catalog_manager: CatalogManager,
     active_intent: Option<UiIntent>,
     selected_template: Option<TemplateSelectionContext>,
     no_matching_template: bool,
     pending_provisional_template: Option<TemplateDocument>,
+    canvas_blocks: Vec<CanvasBlock>,
+    active_block_id: Option<String>,
+    canvas_event_log: UiEventLog,
+    block_nonce: u64,
+    awaiting_assistant_turn: bool,
+    pending_canvas_renders: Vec<CanvasRenderRequest>,
 }
 
 impl BrownieApp {
@@ -72,12 +198,17 @@ impl BrownieApp {
             scroll_to_bottom: false,
             session_unavailable: false,
             theme: Theme::default(),
-            ui_runtime: UiRuntime::new(),
             catalog_manager,
             active_intent: None,
             selected_template: None,
             no_matching_template: false,
             pending_provisional_template: None,
+            canvas_blocks: Vec::new(),
+            active_block_id: None,
+            canvas_event_log: UiEventLog::default(),
+            block_nonce: 0,
+            awaiting_assistant_turn: false,
+            pending_canvas_renders: Vec::new(),
         };
 
         let catalog_diagnostics = app
@@ -162,12 +293,6 @@ impl BrownieApp {
         if prompt.is_empty() {
             return;
         }
-        if let Some(intent) = Self::intent_from_prompt(&prompt) {
-            self.resolve_canvas_for_intent(intent);
-        } else {
-            self.clear_canvas_intent();
-            self.log_diagnostic("catalog resolve skipped: no intent detected");
-        }
 
         let message = Message {
             role: "user".to_string(),
@@ -178,19 +303,14 @@ impl BrownieApp {
         self.transcript.push(message.clone());
         if let Some(meta) = self.current_session.as_mut() {
             meta.messages.push(message);
-            if let Err(err) = store::save(meta) {
-                self.log_diagnostic(format!("failed to persist session: {err}"));
-            }
         }
+        self.persist_current_session();
 
         self.copilot.send(prompt);
+        self.awaiting_assistant_turn = true;
         self.input_buffer.clear();
         self.scroll_to_bottom = true;
         ctx.request_repaint();
-    }
-
-    fn intent_from_prompt(prompt: &str) -> Option<UiIntent> {
-        intent_from_text(prompt)
     }
 
     fn clear_canvas_intent(&mut self) {
@@ -198,10 +318,149 @@ impl BrownieApp {
         self.selected_template = None;
         self.no_matching_template = false;
         self.pending_provisional_template = None;
-        self.ui_runtime.clear_schema();
+        self.canvas_blocks.clear();
+        self.active_block_id = None;
     }
 
-    fn resolve_canvas_for_intent(&mut self, intent: UiIntent) {
+    fn now_millis() -> u128 {
+        match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(duration) => duration.as_millis(),
+            Err(_) => 0,
+        }
+    }
+
+    fn next_block_id(&mut self) -> String {
+        self.block_nonce = self.block_nonce.saturating_add(1);
+        format!("block-{}", self.block_nonce)
+    }
+
+    fn active_block_index(&self) -> Option<usize> {
+        let active_id = self.active_block_id.as_ref()?;
+        self.canvas_blocks
+            .iter()
+            .position(|block| &block.state.block_id == active_id)
+    }
+
+    fn sync_active_selection_context(&mut self) {
+        let Some(index) = self.active_block_index() else {
+            self.selected_template = None;
+            return;
+        };
+
+        let block = &self.canvas_blocks[index];
+        self.selected_template = Some(TemplateSelectionContext {
+            template_id: block.state.template_id.clone(),
+            title: block.state.title.clone(),
+            provider_id: block.state.provider_id.clone(),
+            provider_kind: block.state.provider_kind.clone(),
+        });
+        self.active_intent = Some(block.state.intent.clone());
+    }
+
+    fn snapshot_canvas_workspace(&self) -> CanvasWorkspaceState {
+        let mut blocks = Vec::with_capacity(self.canvas_blocks.len());
+        for block in &self.canvas_blocks {
+            let mut state = block.state.clone();
+            state.form_state = block.ui_runtime.form_state_snapshot();
+            blocks.push(state);
+        }
+        CanvasWorkspaceState {
+            blocks,
+            active_block_id: self.active_block_id.clone(),
+        }
+    }
+
+    fn persist_current_session(&mut self) {
+        let snapshot = self.snapshot_canvas_workspace();
+        if let Some(meta) = self.current_session.as_mut() {
+            meta.canvas_workspace = snapshot;
+            if let Err(err) = store::save(meta) {
+                self.log_diagnostic(format!("failed to persist session: {err}"));
+            }
+        }
+    }
+
+    fn restore_canvas_workspace(&mut self, workspace: &CanvasWorkspaceState) {
+        self.canvas_blocks.clear();
+        self.canvas_event_log = UiEventLog::default();
+        self.active_block_id = workspace.active_block_id.clone();
+
+        for state in &workspace.blocks {
+            let mut runtime = UiRuntime::new();
+            let mut synced_event_count = 0usize;
+            if let Err(err) = runtime.load_schema_value(&state.schema) {
+                self.log_diagnostic(format!(
+                    "failed to restore canvas block {}: {err}",
+                    state.block_id
+                ));
+            } else {
+                runtime.restore_form_state(state.form_state.clone());
+                synced_event_count = runtime.event_log().len();
+            }
+
+            let touched = Self::now_millis();
+            self.canvas_blocks.push(CanvasBlock {
+                state: state.clone(),
+                ui_runtime: runtime,
+                synced_event_count,
+                last_touched_at: touched,
+            });
+        }
+
+        if self.active_block_index().is_none() {
+            self.active_block_id = self
+                .canvas_blocks
+                .first()
+                .map(|block| block.state.block_id.clone());
+        }
+
+        let highest_nonce = self
+            .canvas_blocks
+            .iter()
+            .filter_map(|block| block.state.block_id.strip_prefix("block-"))
+            .filter_map(|suffix| suffix.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0);
+        self.block_nonce = highest_nonce;
+
+        self.sync_active_selection_context();
+    }
+
+    fn emit_canvas_lifecycle(
+        &mut self,
+        action: CanvasBlockActionType,
+        actor: CanvasBlockActor,
+        status: CanvasBlockActionStatus,
+        block_id: Option<String>,
+        message: Option<String>,
+    ) {
+        self.canvas_event_log.push(UiEvent::CanvasBlockLifecycle {
+            action,
+            actor,
+            status,
+            block_id: block_id.clone(),
+            message: message.clone(),
+        });
+
+        let mut line = format!(
+            "canvas lifecycle action={:?} actor={:?} status={:?} block_id={}",
+            action,
+            actor,
+            status,
+            block_id.as_deref().unwrap_or("-")
+        );
+        if let Some(message) = message {
+            line.push_str(&format!(" message={}", message.replace('\n', " ")));
+        }
+        self.log_diagnostic(line);
+    }
+
+    fn resolve_canvas_for_intent(
+        &mut self,
+        intent: UiIntent,
+        actor: CanvasBlockActor,
+        target_block_id: Option<String>,
+    ) {
         self.active_intent = Some(intent.clone());
         let resolution = self.catalog_manager.resolve(&intent);
         for line in resolution.trace.diagnostic_lines() {
@@ -221,15 +480,282 @@ impl BrownieApp {
             let schema = self.materialize_template_schema(
                 template.document.meta.id.as_str(),
                 template.schema_value(),
+                None,
             );
-            if let Err(err) = self.ui_runtime.load_schema_value(&schema) {
-                self.log_diagnostic(format!("catalog runtime error: {err}"));
-            }
+            self.apply_canvas_block_from_schema(
+                intent,
+                template.document.meta.id,
+                template.document.meta.title,
+                template.source.provider_id,
+                template.source.kind.as_str().to_string(),
+                schema,
+                actor,
+                target_block_id,
+            );
         } else {
             self.selected_template = None;
             self.no_matching_template = true;
-            self.ui_runtime.clear_schema();
         }
+    }
+
+    fn resolve_target_block(&self, template_id: &str) -> BlockTargetResolution {
+        resolve_block_target_for_template(
+            &self.canvas_blocks,
+            self.active_block_id.as_deref(),
+            template_id,
+        )
+    }
+
+    fn apply_canvas_block_from_schema(
+        &mut self,
+        intent: UiIntent,
+        template_id: String,
+        title: String,
+        provider_id: String,
+        provider_kind: String,
+        schema: Value,
+        actor: CanvasBlockActor,
+        target_block_id: Option<String>,
+    ) {
+        enum UpdateTarget {
+            Existing(usize),
+            OpenNew,
+        }
+
+        let target = if let Some(target_block_id) = target_block_id {
+            match self
+                .canvas_blocks
+                .iter()
+                .position(|block| block.state.block_id == target_block_id)
+            {
+                Some(index) => UpdateTarget::Existing(index),
+                None => {
+                    self.emit_canvas_lifecycle(
+                        CanvasBlockActionType::Update,
+                        actor,
+                        CanvasBlockActionStatus::Failed,
+                        Some(target_block_id),
+                        Some("explicit target block_id not found".to_string()),
+                    );
+                    return;
+                }
+            }
+        } else {
+            match self.resolve_target_block(&template_id) {
+                BlockTargetResolution::Existing(index) => UpdateTarget::Existing(index),
+                BlockTargetResolution::NotFound => UpdateTarget::OpenNew,
+                BlockTargetResolution::Ambiguous(block_ids) => {
+                    self.emit_canvas_lifecycle(
+                        CanvasBlockActionType::Update,
+                        actor,
+                        CanvasBlockActionStatus::Failed,
+                        None,
+                        Some(format!(
+                            "ambiguous target; specify block_id (candidates: {})",
+                            block_ids.join(", ")
+                        )),
+                    );
+                    return;
+                }
+            }
+        };
+
+        if let UpdateTarget::Existing(index) = target {
+            let block_id = self.canvas_blocks[index].state.block_id.clone();
+            self.emit_canvas_lifecycle(
+                CanvasBlockActionType::Update,
+                actor,
+                CanvasBlockActionStatus::Requested,
+                Some(block_id.clone()),
+                Some(format!("template_id={template_id}")),
+            );
+
+            if let Err(err) = self.canvas_blocks[index]
+                .ui_runtime
+                .load_schema_value(&schema)
+            {
+                self.emit_canvas_lifecycle(
+                    CanvasBlockActionType::Update,
+                    actor,
+                    CanvasBlockActionStatus::Failed,
+                    Some(block_id),
+                    Some(err.to_string()),
+                );
+                return;
+            }
+
+            self.canvas_blocks[index].state.schema = schema;
+            self.canvas_blocks[index].state.title = title;
+            self.canvas_blocks[index].state.provider_id = provider_id;
+            self.canvas_blocks[index].state.provider_kind = provider_kind;
+            self.canvas_blocks[index].state.intent = intent;
+            self.canvas_blocks[index].state.minimized = false;
+            self.canvas_blocks[index].last_touched_at = Self::now_millis();
+            self.canvas_blocks[index].synced_event_count = 0;
+            self.active_block_id = Some(self.canvas_blocks[index].state.block_id.clone());
+            self.sync_active_selection_context();
+            self.persist_current_session();
+            self.emit_canvas_lifecycle(
+                CanvasBlockActionType::Update,
+                actor,
+                CanvasBlockActionStatus::Succeeded,
+                self.active_block_id.clone(),
+                None,
+            );
+            return;
+        }
+
+        self.emit_canvas_lifecycle(
+            CanvasBlockActionType::Open,
+            actor,
+            CanvasBlockActionStatus::Requested,
+            None,
+            Some(format!("template_id={template_id}")),
+        );
+
+        let mut runtime = UiRuntime::new();
+        if let Err(err) = runtime.load_schema_value(&schema) {
+            self.emit_canvas_lifecycle(
+                CanvasBlockActionType::Open,
+                actor,
+                CanvasBlockActionStatus::Failed,
+                None,
+                Some(err.to_string()),
+            );
+            return;
+        }
+
+        let block_id = self.next_block_id();
+        let block = CanvasBlock {
+            state: CanvasBlockState {
+                block_id: block_id.clone(),
+                template_id: template_id.clone(),
+                title,
+                provider_id,
+                provider_kind,
+                schema,
+                intent,
+                minimized: false,
+                form_state: runtime.form_state_snapshot(),
+            },
+            ui_runtime: runtime,
+            synced_event_count: 0,
+            last_touched_at: Self::now_millis(),
+        };
+        self.canvas_blocks.push(block);
+        self.active_block_id = Some(block_id.clone());
+        self.sync_active_selection_context();
+        self.persist_current_session();
+        self.emit_canvas_lifecycle(
+            CanvasBlockActionType::Open,
+            actor,
+            CanvasBlockActionStatus::Succeeded,
+            Some(block_id),
+            Some(format!("template_id={template_id}")),
+        );
+    }
+
+    fn focus_block(&mut self, block_id: &str, actor: CanvasBlockActor) {
+        self.emit_canvas_lifecycle(
+            CanvasBlockActionType::Focus,
+            actor,
+            CanvasBlockActionStatus::Requested,
+            Some(block_id.to_string()),
+            None,
+        );
+
+        if !apply_focus_transition(
+            &mut self.canvas_blocks,
+            &mut self.active_block_id,
+            block_id,
+            Self::now_millis(),
+        ) {
+            self.emit_canvas_lifecycle(
+                CanvasBlockActionType::Focus,
+                actor,
+                CanvasBlockActionStatus::Failed,
+                Some(block_id.to_string()),
+                Some("block not found".to_string()),
+            );
+            return;
+        }
+
+        self.sync_active_selection_context();
+        self.persist_current_session();
+        self.emit_canvas_lifecycle(
+            CanvasBlockActionType::Focus,
+            actor,
+            CanvasBlockActionStatus::Succeeded,
+            Some(block_id.to_string()),
+            None,
+        );
+    }
+
+    fn toggle_minimize_block(&mut self, block_id: &str, actor: CanvasBlockActor) {
+        self.emit_canvas_lifecycle(
+            CanvasBlockActionType::Minimize,
+            actor,
+            CanvasBlockActionStatus::Requested,
+            Some(block_id.to_string()),
+            None,
+        );
+
+        let Some(minimized) =
+            apply_toggle_minimize_transition(&mut self.canvas_blocks, block_id, Self::now_millis())
+        else {
+            self.emit_canvas_lifecycle(
+                CanvasBlockActionType::Minimize,
+                actor,
+                CanvasBlockActionStatus::Failed,
+                Some(block_id.to_string()),
+                Some("block not found".to_string()),
+            );
+            return;
+        };
+
+        self.persist_current_session();
+        self.emit_canvas_lifecycle(
+            CanvasBlockActionType::Minimize,
+            actor,
+            CanvasBlockActionStatus::Succeeded,
+            Some(block_id.to_string()),
+            Some(if minimized {
+                "minimized".to_string()
+            } else {
+                "expanded".to_string()
+            }),
+        );
+    }
+
+    fn close_block(&mut self, block_id: &str, actor: CanvasBlockActor) {
+        self.emit_canvas_lifecycle(
+            CanvasBlockActionType::Close,
+            actor,
+            CanvasBlockActionStatus::Requested,
+            Some(block_id.to_string()),
+            None,
+        );
+
+        if !apply_close_transition(&mut self.canvas_blocks, &mut self.active_block_id, block_id) {
+            self.emit_canvas_lifecycle(
+                CanvasBlockActionType::Close,
+                actor,
+                CanvasBlockActionStatus::Failed,
+                Some(block_id.to_string()),
+                Some("block not found".to_string()),
+            );
+            return;
+        }
+
+        self.sync_active_selection_context();
+        self.persist_current_session();
+        self.emit_canvas_lifecycle(
+            CanvasBlockActionType::Close,
+            actor,
+            CanvasBlockActionStatus::Succeeded,
+            Some(block_id.to_string()),
+            None,
+        );
     }
 
     fn save_pending_provisional_template(&mut self) {
@@ -249,7 +775,7 @@ impl BrownieApp {
                     template.match_rules.operations,
                     template.match_rules.tags,
                 );
-                self.resolve_canvas_for_intent(intent);
+                self.resolve_canvas_for_intent(intent, CanvasBlockActor::System, None);
             }
             Err(err) => {
                 self.log_diagnostic(format!("failed to save provisional template: {err}"));
@@ -257,26 +783,52 @@ impl BrownieApp {
         }
     }
 
-    fn materialize_template_schema(&self, template_id: &str, schema: &Value) -> Value {
+    fn materialize_template_schema(
+        &self,
+        template_id: &str,
+        schema: &Value,
+        root_path: Option<&str>,
+    ) -> Value {
         if template_id != "builtin.file_listing.default" {
             return schema.clone();
         }
 
         let mut materialized = schema.clone();
-        let listing = self.workspace_root_listing();
+        let listing = self.file_explorer_listing(root_path);
+        let root_label = self.file_explorer_root_label(root_path);
         if let Some(components) = materialized
             .get_mut("components")
             .and_then(|value| value.as_array_mut())
         {
+            components.retain(|component| {
+                matches!(
+                    component.get("id").and_then(|value| value.as_str()),
+                    Some("explorer_intro") | Some("workspace_tree")
+                )
+            });
             for component in components {
                 let is_workspace_tree = component
                     .get("id")
                     .and_then(|value| value.as_str())
                     .map(|id| id == "workspace_tree")
                     .unwrap_or(false);
+                let is_intro = component
+                    .get("id")
+                    .and_then(|value| value.as_str())
+                    .map(|id| id == "explorer_intro")
+                    .unwrap_or(false);
                 if is_workspace_tree {
                     if let Some(code) = component.get_mut("code") {
                         *code = Value::String(listing.clone());
+                    }
+                }
+                if is_intro {
+                    if let Some(text) = component.get_mut("text") {
+                        *text = Value::String(
+                            format!(
+                                "### File Explorer\nRoot: `{root_label}`\nPersistent session block. Use focus/minimize/close controls."
+                            ),
+                        );
                     }
                 }
             }
@@ -285,15 +837,35 @@ impl BrownieApp {
         materialized
     }
 
-    fn workspace_root_listing(&self) -> String {
-        let root_name = self
-            .workspace
+    fn file_explorer_root_path(&self, root_path: Option<&str>) -> PathBuf {
+        let Some(root_path) = root_path.map(str::trim).filter(|value| !value.is_empty()) else {
+            return self.workspace.clone();
+        };
+
+        let candidate = PathBuf::from(root_path);
+        if candidate.is_absolute() {
+            candidate
+        } else {
+            self.workspace.join(candidate)
+        }
+    }
+
+    fn file_explorer_root_label(&self, root_path: Option<&str>) -> String {
+        self.file_explorer_root_path(root_path)
+            .display()
+            .to_string()
+    }
+
+    fn file_explorer_listing(&self, root_path: Option<&str>) -> String {
+        let root = self.file_explorer_root_path(root_path);
+        let root_name = root
             .file_name()
             .and_then(|value| value.to_str())
-            .unwrap_or("workspace");
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| root.display().to_string());
 
         let mut entries = Vec::new();
-        match fs::read_dir(&self.workspace) {
+        match fs::read_dir(&root) {
             Ok(read_dir) => {
                 for entry in read_dir.flatten() {
                     let name = entry.file_name().to_string_lossy().to_string();
@@ -305,7 +877,7 @@ impl BrownieApp {
                 }
             }
             Err(err) => {
-                return format!("{root_name}/\n└── <failed to read workspace: {err}>");
+                return format!("{root_name}/\n└── <failed to read root: {err}>");
             }
         }
 
@@ -332,13 +904,56 @@ impl BrownieApp {
 
         if let Some(session) = session {
             self.transcript = session.messages.clone();
+            self.restore_canvas_workspace(&session.canvas_workspace);
             self.current_session = Some(session);
             self.is_streaming = false;
             self.in_progress_assistant.clear();
             self.scroll_to_bottom = true;
             self.session_unavailable = false;
+            self.awaiting_assistant_turn = false;
+            self.pending_canvas_renders.clear();
         } else {
             self.session_unavailable = true;
+            self.clear_canvas_intent();
+            self.canvas_event_log = UiEventLog::default();
+            self.awaiting_assistant_turn = false;
+            self.pending_canvas_renders.clear();
+        }
+    }
+
+    fn apply_canvas_render_request(
+        &mut self,
+        request: CanvasRenderRequest,
+        ctx: Option<&egui::Context>,
+    ) {
+        self.active_intent = Some(request.intent.clone());
+        self.no_matching_template = false;
+        self.pending_provisional_template = request.provisional_template;
+
+        let schema = self.materialize_template_schema(
+            &request.template_id,
+            &request.schema,
+            request.root_path.as_deref(),
+        );
+        self.apply_canvas_block_from_schema(
+            request.intent,
+            request.template_id,
+            request.title,
+            request.provider_id,
+            request.provider_kind,
+            schema,
+            CanvasBlockActor::Assistant,
+            request.target_block_id,
+        );
+        if let Some(ctx) = ctx {
+            ctx.request_repaint();
+        }
+    }
+
+    fn flush_pending_canvas_renders(&mut self, ctx: Option<&egui::Context>) {
+        let pending = std::mem::take(&mut self.pending_canvas_renders);
+        for render in pending {
+            self.apply_canvas_render_request(render, ctx);
         }
     }
 
@@ -375,13 +990,13 @@ impl BrownieApp {
                     self.transcript.push(message.clone());
                     if let Some(meta) = self.current_session.as_mut() {
                         meta.messages.push(message);
-                        if let Err(err) = store::save(meta) {
-                            self.log_diagnostic(format!("failed to persist session: {err}"));
-                        }
                     }
+                    self.persist_current_session();
                 }
 
                 self.is_streaming = false;
+                self.awaiting_assistant_turn = false;
+                self.flush_pending_canvas_renders(ctx);
                 self.scroll_to_bottom = true;
                 if let Some(ctx) = ctx {
                     ctx.request_repaint();
@@ -397,6 +1012,8 @@ impl BrownieApp {
             AppEvent::SdkError(message) => {
                 self.log_diagnostic(format!("sdk error: {message}"));
                 self.is_streaming = false;
+                self.awaiting_assistant_turn = false;
+                self.flush_pending_canvas_renders(ctx);
             }
             AppEvent::SessionCreated(session_id) => {
                 let meta = SessionMeta {
@@ -408,6 +1025,7 @@ impl BrownieApp {
                         session_id.chars().take(8).collect::<String>()
                     )),
                     created_at: Self::timestamp(),
+                    canvas_workspace: CanvasWorkspaceState::default(),
                     messages: Vec::new(),
                 };
 
@@ -416,6 +1034,10 @@ impl BrownieApp {
                 self.in_progress_assistant.clear();
                 self.is_streaming = false;
                 self.session_unavailable = false;
+                self.awaiting_assistant_turn = false;
+                self.pending_canvas_renders.clear();
+                self.clear_canvas_intent();
+                self.canvas_event_log = UiEventLog::default();
 
                 if let Err(err) = store::save(&meta) {
                     self.log_diagnostic(format!("failed to persist new session: {err}"));
@@ -447,25 +1069,27 @@ impl BrownieApp {
                 title,
                 provider_id,
                 provider_kind,
+                target_block_id,
+                root_path,
                 schema,
                 provisional_template,
             } => {
-                self.active_intent = Some(intent);
-                self.no_matching_template = false;
-                self.selected_template = Some(TemplateSelectionContext {
-                    template_id: template_id.clone(),
+                let request = CanvasRenderRequest {
+                    intent,
+                    template_id,
                     title,
                     provider_id,
                     provider_kind,
-                });
-                self.pending_provisional_template = provisional_template;
-
-                let schema = self.materialize_template_schema(&template_id, &schema);
-                if let Err(err) = self.ui_runtime.load_schema_value(&schema) {
-                    self.log_diagnostic(format!("canvas tool render failed: {err}"));
-                }
-                if let Some(ctx) = ctx {
-                    ctx.request_repaint();
+                    target_block_id,
+                    root_path,
+                    schema,
+                    provisional_template,
+                };
+                if self.awaiting_assistant_turn || self.is_streaming {
+                    self.log_diagnostic("deferred canvas render until assistant turn completed");
+                    self.pending_canvas_renders.push(request);
+                } else {
+                    self.apply_canvas_render_request(request, ctx);
                 }
             }
         }
@@ -699,28 +1323,116 @@ impl BrownieApp {
                     }
                 });
 
+                let mut focus_block: Option<String> = None;
+                let mut toggle_block: Option<String> = None;
+                let mut close_block: Option<String> = None;
+                let mut new_events: Vec<UiEvent> = Vec::new();
+
                 self.theme.card_frame().show(ui, |ui| {
                     ui.label(
-                        RichText::new("Template Canvas")
+                        RichText::new("Workspace Blocks")
                             .strong()
                             .size(14.0)
                             .color(self.theme.text_primary),
                     );
                     ui.add_space(Theme::P8);
-                    if self.active_intent.is_none() {
-                        ui.label(
-                            RichText::new("No UI intent selected")
-                                .size(13.0)
-                                .color(self.theme.text_muted),
-                        );
-                    } else if self.no_matching_template {
-                        ui.label(
-                            RichText::new("No matching UI template found")
-                                .size(13.0)
-                                .color(self.theme.danger),
-                        );
+                    if self.canvas_blocks.is_empty() {
+                        if self.no_matching_template {
+                            ui.label(
+                                RichText::new("No matching UI template found")
+                                    .size(13.0)
+                                    .color(self.theme.danger),
+                            );
+                        } else {
+                            ui.label(
+                                RichText::new("No open Canvas blocks")
+                                    .size(13.0)
+                                    .color(self.theme.text_muted),
+                            );
+                        }
                     } else {
-                        self.ui_runtime.render_canvas(ui, &self.theme);
+                        for index in 0..self.canvas_blocks.len() {
+                            let block_id = self.canvas_blocks[index].state.block_id.clone();
+                            let block_title = self.canvas_blocks[index].state.title.clone();
+                            let provider_id = self.canvas_blocks[index].state.provider_id.clone();
+                            let provider_kind =
+                                self.canvas_blocks[index].state.provider_kind.clone();
+                            let is_minimized = self.canvas_blocks[index].state.minimized;
+                            let is_active =
+                                self.active_block_id.as_deref() == Some(block_id.as_str());
+                            let border_color = if is_active {
+                                self.theme.accent_primary
+                            } else {
+                                self.theme.border_subtle
+                            };
+                            Frame::new()
+                                .fill(self.theme.surface_2)
+                                .stroke(Stroke::new(1.0, border_color))
+                                .corner_radius(egui::CornerRadius::same(self.theme.radius_10))
+                                .inner_margin(egui::Margin::same(self.theme.spacing_12 as i8))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "{} ({})",
+                                                block_title, block_id
+                                            ))
+                                            .size(13.0)
+                                            .color(self.theme.text_primary),
+                                        );
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(Align::Center),
+                                            |ui| {
+                                                if ui.add(egui::Button::new("Close")).clicked() {
+                                                    close_block = Some(block_id.clone());
+                                                }
+                                                if ui
+                                                    .add(egui::Button::new(if is_minimized {
+                                                        "Expand"
+                                                    } else {
+                                                        "Minimize"
+                                                    }))
+                                                    .clicked()
+                                                {
+                                                    toggle_block = Some(block_id.clone());
+                                                }
+                                                if !is_active
+                                                    && ui.add(egui::Button::new("Focus")).clicked()
+                                                {
+                                                    focus_block = Some(block_id.clone());
+                                                }
+                                            },
+                                        );
+                                    });
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "Source: {} [{}]",
+                                            provider_id, provider_kind
+                                        ))
+                                        .size(12.0)
+                                        .color(self.theme.text_muted),
+                                    );
+                                    if is_minimized {
+                                        ui.label(
+                                            RichText::new("Block is minimized")
+                                                .size(12.0)
+                                                .color(self.theme.text_muted),
+                                        );
+                                    } else {
+                                        ui.add_space(Theme::P8);
+                                        let block = &mut self.canvas_blocks[index];
+                                        block.ui_runtime.render_canvas(ui, &self.theme);
+                                        let events = block.ui_runtime.event_log();
+                                        if block.synced_event_count < events.len() {
+                                            new_events.extend_from_slice(
+                                                &events[block.synced_event_count..],
+                                            );
+                                            block.synced_event_count = events.len();
+                                        }
+                                    }
+                                });
+                            ui.add_space(Theme::P8);
+                        }
                     }
                 });
 
@@ -756,8 +1468,40 @@ impl BrownieApp {
                 }
 
                 self.theme.card_frame().show(ui, |ui| {
-                    self.ui_runtime.render_event_log(ui, &self.theme);
+                    ui.label(
+                        RichText::new("UI Event Log")
+                            .color(self.theme.text_primary)
+                            .size(13.0),
+                    );
+                    ui.add_space(Theme::P8);
+                    ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+                        for event in self.canvas_event_log.entries() {
+                            ui.label(
+                                RichText::new(event.to_log_line())
+                                    .color(self.theme.text_muted)
+                                    .size(12.0),
+                            );
+                        }
+                    });
                 });
+
+                let had_new_events = !new_events.is_empty();
+                for event in new_events {
+                    self.canvas_event_log.push(event);
+                }
+                if had_new_events {
+                    self.persist_current_session();
+                }
+
+                if let Some(block_id) = focus_block {
+                    self.focus_block(&block_id, CanvasBlockActor::User);
+                }
+                if let Some(block_id) = toggle_block {
+                    self.toggle_minimize_block(&block_id, CanvasBlockActor::User);
+                }
+                if let Some(block_id) = close_block {
+                    self.close_block(&block_id, CanvasBlockActor::User);
+                }
 
                 if save_provisional {
                     self.save_pending_provisional_template();
@@ -967,5 +1711,133 @@ impl eframe::App for BrownieApp {
         self.render_left_panel(ctx);
         self.render_right_panel(ctx);
         self.render_center_panel(ctx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        apply_close_transition, apply_focus_transition, apply_toggle_minimize_transition,
+        resolve_block_target_for_template, BlockTargetResolution, CanvasBlock,
+    };
+    use crate::ui::catalog::UiIntent;
+    use crate::ui::runtime::UiRuntime;
+    use crate::ui::workspace::CanvasBlockState;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    fn block(block_id: &str, template_id: &str, touched: u128) -> CanvasBlock {
+        CanvasBlock {
+            state: CanvasBlockState {
+                block_id: block_id.to_string(),
+                template_id: template_id.to_string(),
+                title: block_id.to_string(),
+                provider_id: "builtin-default".to_string(),
+                provider_kind: "builtin".to_string(),
+                schema: json!({
+                    "schema_version": 1,
+                    "outputs": [],
+                    "components": [
+                        {
+                            "id": "intro",
+                            "kind": "markdown",
+                            "text": "hello"
+                        }
+                    ]
+                }),
+                intent: UiIntent::new("file_listing", vec!["list".to_string()], vec![]),
+                minimized: false,
+                form_state: BTreeMap::new(),
+            },
+            ui_runtime: UiRuntime::new(),
+            synced_event_count: 0,
+            last_touched_at: touched,
+        }
+    }
+
+    #[test]
+    fn target_selection_prefers_active_matching_block() {
+        let blocks = vec![
+            block("block-1", "builtin.file_listing.default", 1),
+            block("block-2", "builtin.file_listing.default", 999),
+        ];
+        let selected = resolve_block_target_for_template(
+            &blocks,
+            Some("block-1"),
+            "builtin.file_listing.default",
+        );
+        assert_eq!(selected, BlockTargetResolution::Existing(0));
+    }
+
+    #[test]
+    fn target_selection_falls_back_to_unique_most_recent_matching_block() {
+        let blocks = vec![
+            block("block-1", "builtin.file_listing.default", 1),
+            block("block-2", "builtin.file_listing.default", 999),
+            block("block-3", "builtin.plan_review.default", 2000),
+        ];
+        let selected = resolve_block_target_for_template(
+            &blocks,
+            Some("block-3"),
+            "builtin.file_listing.default",
+        );
+        assert_eq!(selected, BlockTargetResolution::Existing(1));
+    }
+
+    #[test]
+    fn target_selection_fails_when_recent_candidates_are_ambiguous() {
+        let blocks = vec![
+            block("block-1", "builtin.file_listing.default", 777),
+            block("block-2", "builtin.file_listing.default", 777),
+        ];
+        let selected =
+            resolve_block_target_for_template(&blocks, None, "builtin.file_listing.default");
+        assert_eq!(
+            selected,
+            BlockTargetResolution::Ambiguous(vec!["block-1".to_string(), "block-2".to_string()])
+        );
+    }
+
+    #[test]
+    fn focus_transition_sets_active_without_removing_blocks() {
+        let mut blocks = vec![
+            block("block-1", "builtin.file_listing.default", 1),
+            block("block-2", "builtin.plan_review.default", 2),
+        ];
+        let mut active = Some("block-1".to_string());
+
+        assert!(apply_focus_transition(
+            &mut blocks,
+            &mut active,
+            "block-2",
+            5000,
+        ));
+        assert_eq!(active.as_deref(), Some("block-2"));
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[1].last_touched_at, 5000);
+    }
+
+    #[test]
+    fn minimize_transition_toggles_without_removing_block() {
+        let mut blocks = vec![block("block-1", "builtin.file_listing.default", 1)];
+        let minimized = apply_toggle_minimize_transition(&mut blocks, "block-1", 100);
+        assert_eq!(minimized, Some(true));
+        assert_eq!(blocks.len(), 1);
+        assert!(blocks[0].state.minimized);
+    }
+
+    #[test]
+    fn close_transition_removes_only_target_and_updates_active_fallback() {
+        let mut blocks = vec![
+            block("block-1", "builtin.file_listing.default", 1),
+            block("block-2", "builtin.plan_review.default", 2),
+            block("block-3", "builtin.status.default", 3),
+        ];
+        let mut active = Some("block-2".to_string());
+
+        assert!(apply_close_transition(&mut blocks, &mut active, "block-2"));
+        assert_eq!(blocks.len(), 2);
+        assert!(blocks.iter().all(|block| block.state.block_id != "block-2"));
+        assert_eq!(active.as_deref(), Some("block-3"));
     }
 }

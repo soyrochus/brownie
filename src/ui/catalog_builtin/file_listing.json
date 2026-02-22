@@ -1,7 +1,7 @@
 {
   "meta": {
     "id": "builtin.file_listing.default",
-    "title": "Workspace Explorer (Read-Only)",
+    "title": "File Explorer (Read-Only)",
     "version": "1.0.0",
     "tags": ["files", "tree", "workspace"]
   },
@@ -17,7 +17,7 @@
       {
         "id": "explorer_intro",
         "kind": "markdown",
-        "text": "### Workspace Explorer\\nRead-only file manager view with directory tree indicators."
+        "text": "### File Explorer\\nRead-only file manager view with directory tree indicators."
       },
       {
         "id": "tree_legend",

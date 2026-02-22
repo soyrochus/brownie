@@ -31,17 +31,20 @@ impl CopilotClient {
 
 UI model:
 - Brownie has three panes: Workspace, Chat, and Canvas.
-- Canvas is rendered by the host app from validated UiSchema templates selected by intent.
+- Canvas is a persistent session workspace composed of reusable UI blocks.
+- Templates are rendered by the host app into blocks from validated UiSchema payloads.
 - You cannot directly draw arbitrary graphics, but users do have a Canvas surface you should refer to when asked about UI.
 
 Current Canvas capabilities:
 - code_review template: markdown, form fields, diff, action buttons
 - plan_review template: markdown, form fields, action button
-- file_listing template: workspace file listing rendered in canvas
+- file_listing template: generic file explorer block rendered in canvas (set `root_path` when needed)
 
 Behavior requirements:
 - Do not claim there is no canvas or that the UI is terminal-only.
 - Use the `query_ui_catalog` tool for requests about showing UI in canvas.
+- For file browsing requests, pass `root_path` when you want a specific directory root.
+- Prefer updating/focusing existing canvas blocks when the same template is already present, instead of repeatedly creating replacement views.
 - Never claim that something is rendered unless `query_ui_catalog` in the same turn returns `status=rendered_catalog` or `status=rendered_provisional`.
 - If `query_ui_catalog` returns `status=text_only` or any error, explicitly say canvas was not rendered and provide a text fallback.
 - If `query_ui_catalog` reports `rendered_catalog` or `rendered_provisional`, confirm what was rendered.
@@ -59,13 +62,20 @@ Behavior requirements:
                         "type": "string",
                         "description": "User request to evaluate against the UI catalog"
                     },
+                    "root_path": {
+                        "type": "string",
+                        "description": "Optional root path for file explorer rendering; relative paths resolve from workspace"
+                    },
+                    "target_block_id": {
+                        "type": "string",
+                        "description": "Optional explicit canvas block id to update or focus"
+                    },
                     "allow_provisional": {
                         "type": "boolean",
                         "description": "When no catalog template matches, create and render a provisional template",
                         "default": true
                     }
-                },
-                "required": ["query"]
+                }
             }))
     }
 
@@ -73,7 +83,7 @@ Behavior requirements:
         Arc::new(move |_name, args| {
             let Some(query) = extract_tool_query(args) else {
                 return ToolResultObject::error(
-                    "query_ui_catalog requires a non-empty query string (supported keys: query, prompt, request, text, message)",
+                    "query_ui_catalog requires a non-empty query string (supported keys: query, prompt, request, text, message, input)",
                 );
             };
 
@@ -81,6 +91,11 @@ Behavior requirements:
                 .get("allow_provisional")
                 .and_then(|value| value.as_bool())
                 .unwrap_or(true);
+            let target_block_id = args
+                .get("target_block_id")
+                .and_then(|value| value.as_str())
+                .map(ToOwned::to_owned);
+            let root_path = extract_string_argument(args, &["root_path", "root", "path"]);
 
             let Some(intent) = intent_from_text(query.as_str()) else {
                 return ToolResultObject::text(
@@ -104,6 +119,8 @@ Behavior requirements:
                     title: template.document.meta.title.clone(),
                     provider_id: template.source.provider_id.clone(),
                     provider_kind: template.source.kind.as_str().to_string(),
+                    target_block_id: target_block_id.clone(),
+                    root_path: root_path.clone(),
                     schema: template.schema_value().clone(),
                     provisional_template: None,
                 };
@@ -116,6 +133,8 @@ Behavior requirements:
                         "template_id": template.document.meta.id,
                         "title": template.document.meta.title,
                         "provider": template.source.provider_id,
+                        "target_block_id": target_block_id,
+                        "root_path": root_path,
                         "needs_save_confirmation": false
                     })
                     .to_string(),
@@ -140,6 +159,8 @@ Behavior requirements:
                 title: provisional.meta.title.clone(),
                 provider_id: "runtime-provisional".to_string(),
                 provider_kind: "provisional".to_string(),
+                target_block_id: target_block_id.clone(),
+                root_path: root_path.clone(),
                 schema: provisional.schema.clone(),
                 provisional_template: Some(provisional.clone()),
             };
@@ -151,6 +172,8 @@ Behavior requirements:
                     "intent": intent.summary(),
                     "template_id": provisional.meta.id,
                     "title": provisional.meta.title,
+                    "target_block_id": target_block_id,
+                    "root_path": root_path,
                     "needs_save_confirmation": true
                 })
                 .to_string(),
@@ -379,8 +402,8 @@ Behavior requirements:
     }
 }
 
-fn extract_tool_query(args: &Value) -> Option<String> {
-    for key in ["query", "prompt", "request", "text", "message"] {
+fn extract_string_argument(args: &Value, keys: &[&str]) -> Option<String> {
+    for key in keys {
         if let Some(query) = args.get(key).and_then(Value::as_str) {
             let query = query.trim();
             if !query.is_empty() {
@@ -389,14 +412,38 @@ fn extract_tool_query(args: &Value) -> Option<String> {
         }
     }
 
-    if let Some(query) = args.as_str() {
-        let query = query.trim();
-        if !query.is_empty() {
-            return Some(query.to_string());
+    for key in keys {
+        if let Some(nested) = args.get(key) {
+            for nested_key in ["query", "prompt", "request", "text", "message", "input"] {
+                if let Some(query) = nested.get(nested_key).and_then(Value::as_str) {
+                    let query = query.trim();
+                    if !query.is_empty() {
+                        return Some(query.to_string());
+                    }
+                }
+            }
         }
     }
 
     None
+}
+
+fn extract_tool_query(args: &Value) -> Option<String> {
+    if let Some(query) = extract_string_argument(
+        args,
+        &["query", "prompt", "request", "text", "message", "input"],
+    ) {
+        return Some(query);
+    }
+
+    args.as_str().and_then(|query| {
+        let query = query.trim();
+        if query.is_empty() {
+            None
+        } else {
+            Some(query.to_string())
+        }
+    })
 }
 
 fn summarize_tool_execution(
@@ -405,10 +452,15 @@ fn summarize_tool_execution(
     error_message: Option<&str>,
 ) -> (String, Option<String>) {
     if !success {
-        return (
-            "error".to_string(),
-            error_message.map(|message| message.to_string()),
-        );
+        let fallback = error_message
+            .map(|message| message.to_string())
+            .or_else(|| {
+                result_content
+                    .map(str::trim)
+                    .filter(|message| !message.is_empty())
+                    .map(ToOwned::to_owned)
+            });
+        return ("error".to_string(), fallback);
     }
 
     if let Some(content) = result_content {
@@ -440,7 +492,8 @@ fn provisional_template_id(intent: &UiIntent) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::summarize_tool_execution;
+    use super::{extract_tool_query, summarize_tool_execution};
+    use serde_json::json;
 
     #[test]
     fn summarize_tool_execution_reads_status_from_json_payload() {
@@ -458,6 +511,25 @@ mod tests {
         let (status, message) = summarize_tool_execution(false, None, Some("tool call failed"));
         assert_eq!(status, "error");
         assert_eq!(message.as_deref(), Some("tool call failed"));
+    }
+
+    #[test]
+    fn summarize_tool_execution_uses_result_content_when_error_message_missing() {
+        let (status, message) =
+            summarize_tool_execution(false, Some("{\"error\":\"bad args\"}"), None);
+        assert_eq!(status, "error");
+        assert_eq!(message.as_deref(), Some("{\"error\":\"bad args\"}"));
+    }
+
+    #[test]
+    fn extract_tool_query_supports_input_object_payload() {
+        let args = json!({
+            "input": {
+                "query": "show files in src"
+            }
+        });
+        let query = extract_tool_query(&args);
+        assert_eq!(query.as_deref(), Some("show files in src"));
     }
 }
 

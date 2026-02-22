@@ -4,7 +4,7 @@ use crate::ui::registry::ComponentRegistry;
 use crate::ui::schema::{
     field_key, validate_schema, UiSchema, ValidatedComponent, ValidatedSchema,
 };
-use eframe::egui::{self, RichText, ScrollArea};
+use eframe::egui::{self, RichText};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -43,12 +43,6 @@ impl UiRuntime {
             form_state: BTreeMap::new(),
             event_log: UiEventLog::default(),
         }
-    }
-
-    pub fn clear_schema(&mut self) {
-        self.validated_schema = None;
-        self.runtime_error = None;
-        self.form_state.clear();
     }
 
     #[cfg(test)]
@@ -115,6 +109,14 @@ impl UiRuntime {
         self.event_log.entries()
     }
 
+    pub fn form_state_snapshot(&self) -> BTreeMap<String, UiFieldValue> {
+        self.form_state.clone()
+    }
+
+    pub fn restore_form_state(&mut self, state: BTreeMap<String, UiFieldValue>) {
+        self.form_state = state;
+    }
+
     pub fn render_canvas(&mut self, ui: &mut egui::Ui, theme: &Theme) {
         if let Some(error) = &self.runtime_error {
             let frame = theme.card_frame();
@@ -148,24 +150,6 @@ impl UiRuntime {
             );
             ui.add_space(theme.spacing_12);
         }
-    }
-
-    pub fn render_event_log(&self, ui: &mut egui::Ui, theme: &Theme) {
-        ui.label(
-            RichText::new("UI Event Log")
-                .color(theme.text_primary)
-                .size(13.0),
-        );
-        ui.add_space(theme.spacing_8);
-        ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
-            for event in self.event_log() {
-                ui.label(
-                    RichText::new(event.to_log_line())
-                        .color(theme.text_muted)
-                        .size(12.0),
-                );
-            }
-        });
     }
 
     fn seed_form_state(&mut self, components: &[ValidatedComponent]) {

@@ -22,6 +22,8 @@ pub enum AppEvent {
         title: String,
         provider_id: String,
         provider_kind: String,
+        target_block_id: Option<String>,
+        root_path: Option<String>,
         schema: Value,
         provisional_template: Option<TemplateDocument>,
     },

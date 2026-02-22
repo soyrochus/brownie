@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
 
+use crate::ui::workspace::CanvasWorkspaceState;
+
 pub mod store;
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SessionMeta {
@@ -11,6 +13,8 @@ pub struct SessionMeta {
     pub workspace: String,
     pub title: Option<String>,
     pub created_at: String,
+    #[serde(default)]
+    pub canvas_workspace: CanvasWorkspaceState,
     pub messages: Vec<Message>,
 }
 
